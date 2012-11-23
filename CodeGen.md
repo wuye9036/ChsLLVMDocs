@@ -84,27 +84,70 @@ LLVM所提供的平台无关的代码生成器，实际上是一个Framework。�
 <h3>代码生成器的高层设计			 </h3>
 LLVM中使用的平台无关的代码生成器，是针对标准的寄存器机设计的。同时它对效率和生成代码的质量也有一定的要求。整个代码生成可以分为以下阶段：
 
-1. **指令选择（Instruction Selection）** — 这个步骤的作用是将LLVM IR转化成目标平台的指令集。不过这个阶段产生的指令还是很原始的。它一方面借助 _虚拟寄存器（Virtual Register）_ 的概念，让目标代码仍然是SSA Form的；另一方面，对于满足平台的限制和调用协议，它也使用了部分的 _物理寄存器（Physical Register）_ 。最终，LLVM IR被转化成一个由目标平台的指令所组成的 _DAG_。
-2. **调度与格式化（Scheduling and Formation）** — 耳熟能详的指令重排就是这个部分的主要工作。这个阶段将会读取DAG，并根据需要进行重新排列，最后将指令以`MachineInstr`s输出。不过虽然我们这里是单独列为一个阶段，但是实际上它和 _指令选择_ 都操作的是 _SelectionDAG_，并且两者的实现也极为接近，所以在讲解算法的时候，是和 _指令选择_ 放在一起的。
-3. **基于SSA的优化** — 在经历了指令选择和调度后，接下来就需要优化输出的DAG。这个阶段实际上是有很多个基于SSA的优化方法组成`（译注：这也是为什么要在指令选择以后仍然保持SSA Form的原因之一。）`。比方说 _模调度（modulo-scheduling）_ 和 大名鼎鼎的 _窥孔优化（peephole optimization）_ 都是可以在这个阶段执行的。
-4. **寄存器分配** — 到目前为止，我们指令的操作对象，都是在虚拟寄存器和部分的物理寄存器上的。LLVM的虚拟寄存器机制，可以看作是一个无穷大的_虚拟寄存器文件（Virtual Register File）_。但在硬件上，指令只能去操作有限的物理寄存器，或者是内存地址。这个时候我们需要借助 _寄存器溢出（Spilling）_ 的办法，将原本是虚拟寄存器的指令参数，都落实到物理寄存器或内存地址上。
+1. **指令选择（Instruction Selection）** — 这个步骤的作用是将LLVM IR转化成目标平台的指令集。不过这个阶段产生的指令还是很原始的。它一方面借助 _虚拟寄存器（Virtual Register）_ 的概念，让目标代码仍然是SSA Form的；另一方面，为了满足平台的限制和调用协议的需要，它也使用了部分的 _物理寄存器（Physical Register）_ 。最终，LLVM IR被转化成一个由目标平台的指令所组成的 _DAG_。
+2. **调度与格式化（Scheduling and Formation）** — 耳熟能详的指令重排就是这个部分的主要工作。这个阶段将会读取DAG，并根据需要进行重新排列，最后将指令以`MachineInstr`s输出。不过虽然我们这里是单独列为一个阶段，但是实际上它和 _指令选择_ 都操作的是 _SelectionDAG_，并且两者的实现也极为接近，所以在讲算法的时候，将它和 _指令选择_ 放在一起讨论。
+3. **基于SSA的优化** — 在经历了指令选择和调度后，接下来就需要优化上一阶段输出的DAG。整个优化过程实际上是有很多个基于SSA的优化步骤所组成`（译注：这也是为什么要在指令选择以后仍然保持SSA Form的原因之一。）`。比方说 _模调度（modulo-scheduling）_ 和 大名鼎鼎的 _窥孔优化（peephole optimization）_ 都是可以在这个阶段执行的。
+4. **寄存器分配** — 到目前为止，我们指令的操作对象，都是在虚拟寄存器和部分的物理寄存器上的。LLVM的虚拟寄存器机制，可以看作是一个无穷大的 _虚拟寄存器文件（Virtual Register File）_。但在硬件上，指令只能去操作有限的物理寄存器，或者是内存地址。这个时候我们需要借助 _寄存器溢出（Spilling）_ 的办法，将原本是虚拟寄存器的指令参数，都落实到物理寄存器或内存地址上。
 5. **Prolog/Epilog的生成** — 当函数体的指令都生成后，就能够确定需要的堆栈大小了。这个时候我们就需要在函数前后安插一些Prolog和Epilog的代码用于分配堆栈，同时原先没有确定的堆栈位置在此时也可以算出准确的偏移。知道了这些信息，我们还可以完成_栈帧指针消除（Frame Pointer Elimination）_ 或 _堆栈打包（Stack Packing）_ 这一类的优化。
 6. **机器码的晚期优化** — 这个阶段可是最后一次给低效的代码卖后悔药了。基本上到了这里的代码已经和“最终”代码相差无几。不过你仍然有机会进行一些 _Spill code scheduling_ 或者是 _窥孔_ 方面的优化。
 7. **代码发射（Code Emission）** — 在这一步你就需要输出调整完毕的代码了。一般输出代码都以函数为单位。当然目标格式没有什么限制，你可以选择是汇编或者是二进制的机器码。
 
-之所以LLVM的代码生成采用这样的设计，是基于一个重要假设：那就是指令选择的时候，只需要用一个_最优模式匹配选择子（Optimal Pattern Marching Selector）_，就能够生成较高质量的本地指令。当然你说有更牛逼的设计，比方说 _模式展开（Pattern Expansion）_ 或者 _激进迭代窥孔优化（Aggressive Iterative Peephole Optimization）_ ，但是他们实在是太慢了，特别是对于JIT而言。而且这个设计也可以通过多趟优化，来满足普通编译器激进优化的需求。
+之所以LLVM的代码生成采用这样的设计，是基于一个重要假设：我们只需要用一个_最优模式匹配选择子（Optimal Pattern Marching Selector）_ 来匹配生成目标代码，就能够获得较高质量的本地指令。当然你说有更牛逼的设计，比方说 _模式展开（Pattern Expansion）_ 或者 _激进迭代窥孔优化（Aggressive Iterative Peephole Optimization）_ ，但是他们实在是太慢了，特别是对于JIT而言。而且这个设计也可以通过多趟优化，来满足普通编译器激进优化的需求。
 
 上面这些步骤大部分都是平台无关的，但是后端完全可以加入任何平台相关的处理过程。举个栗子！x86体系中，x87浮点运算绝对是个傲娇。它非得要 _浮点堆栈（Floating Point Stack）_ 来搞浮点运算。所以LLVM在x86的实现中就专门有一个Pass来处理这个问题。所以如果你在其它平台遇到了类似的需求，也可以如法炮制。
 
 <h3>使用TableGen生成目标平台描述	 </h3>
-<h2 id = "tardesc_classes">用于描述目标的类</h2>
+用来描述平台特性的类（Target Description Classes）需要存储并提供大量关于目标架构的细节信息。仔细观察会发现，这当中很多信息是相同的。例如`add`所需要的信息几乎和`sub`是完全一致。为尽可能复用这些共性，LLVM使用了一个DSL工具`TableGen`来描述目标平台的信息。这个DSL工具可以更好的抽象出平台上的特性，并尽可能的减少重复的代码。
+
+未来LLVM的开发计划中，我们希望能够把所有的平台描述都移到`.td`文件中。这么做最重要的原因是我们希望LLVM移植起来更方便，因为C++的代码少了，而且移植它的程序员要理解的内容也会少很多。另外，这也会让LLVM更容易修改。如果所有的工作都是`tblgen`完成的话，一旦接口有调整那也只需要修改`tblgen`的实现就可以了。
+
+<h2 id = "tardesc_classes">用于描述平台的类</h2>
+在LLVM中，与平台描述相关的一组类为不同的平台提供了一个相同的抽象接口。这些类在设计上仅仅用来表达目标平台的属性，例如平台所支持的指令和寄存器，但是不会保存任何和具体算法相关联的描述。
+
+所有的平台描述类，除了`DataLayout`外都是可以被继承的。用户可以根据不同的平台提供具体的子类，这些子类通过重载接口的虚函数来提供平台信息。`class TargetMachine`提供了一组接口，可以访问这些描述。
+
 <h3>class <code>TargetMachine		</code></h3>
+`class TargetMachine` 有很多的虚方法可以获得具体的平台描述。这组函数一般都命名成`get*Info`，（如 `getInstrInfo`, `getRegisterInfo`, `getFrameInfo`）。`TargetMachine`也是通过继承为接口提供平台相关的实现（如 `X86TargetMachine`）。如果你只是想实现一个能被LLVM支持的最简单的`TargetMachine`，那只要能返回`DataLayout`就可以了。如果你使用了LLVM其他的代码生成组件，那就需要实现诸如`getInstrInfo`等其他的接口函数。
+
+>	译注：这里可以看做是一个抽象工厂模式。
+>	`TargetMachine`和`Target Description Classes` 的关系，实际上是就抽象工厂和抽象工厂的抽象产品的关系。
+>	X86TargetMachine就是具体工厂，而例如X86RegisterInfo就是具体工厂的具体产品。
+
 <h3>class <code>DataLayout			</code></h3>
+所有平台描述类中，只有`DataLayout`是必须要支持的，同时它也是唯一一个不能继承的类。结构体中成员的内存布局、不同类型的数据对内存对齐的要求、还有平台上指针的大小、平台是Little Endian还是Big Endian，这些信息都保存在DataLayout中。
+
 <h3>class <code>TargetLowering		</code></h3>
+（译注：Lowering是指高层指令向底层指令转化的过程）`TargetLowering`用于指导LLVM的指令选择模块如何将LLVM IR指令转化成SelectionDAG上的节点和操作。该类型保存了以下的信息：
+
+* 对寄存器进行分类，以匹配不同的`ValueType`s（an initial register class to use for various `ValueType`s），
+* 哪些操作（指令）是平台原生支持的，
+* `setcc`的返回类型，
+* _偏移量(shift amounts)_ 的类型，
+* 其他的高层特性，例如是否要把除以常量转换成一个乘法。
+
 <h3>class <code>TargetRegisterInfo	</code></h3>
+`TargetRegisterInfo`描述了目标平台的寄存器文件以及寄存器间的交互。
+
+在代码生成中，每个寄存器都会给一个无符号整数的编号。物理寄存器（也就是平台实际支持的寄存器）的标号通常都较小，而虚拟寄存器的序号一般都往大了标。不过`#0`寄存器被LLVM保留下来当标志寄存器用了。
+
+每个寄存器都对应一个`TargetRegisterDesc`项，这个项保存了寄存器的文本名称（比方说`EAX`，`ECX`之类，输出汇编和dump要用到），以及一坨 _寄存器别名（register alias）_ （如果有的话，寄存别名是说两个寄存器占用了同样的空间，比方说x86中的`EAX`和`AX`）。
+
+`TargetRegisterInfo`还提供了处理器支持的寄存器类别（保存在`TargetRegisterClass`的实例中）。每一类都包含了若干相同属性的寄存器（比方说`EAX`、`EBX`、`ECX`、`EDX`都是32位的整数寄存）。虚拟寄存在创建的时候，也会根据要保存的数据类型，关联到对应的寄存器类别上。所以虚拟寄存器在最终被替换成物理寄存器的时候，也是使用相同类别的寄存器进行替换。
+
+基本上本节涉及类型的具体类一般都是由`.td`直接生成的。
+
 <h3>class <code>TargetInstrInfo		</code></h3>
+`TargetInstrInfo`是用来描述平台指令。基本上它就是一个`TargetInstrDescriptor`的数组。后者望文生义，就是保存了单条指令的信息，常见的有指令的助记符， _参数（Operands）_ 的数量，一些隐含的寄存器使用与定义。指令的信息里既有平台无关的部分，例如是否操作了内存(accesses memory)，或者能交换（is commutable），也会有平台相关的标记。
+
 <h3>class <code>TargetFrameInfo		</code></h3>
+`TargetFrameInfo`提供了关于堆栈布局的信息，包括堆栈的增长方向，堆栈的对齐要求以及 _本地偏移（offset to the local area）_。这里的 _本地偏移_ 是指函数内的数据（局部变量或者Spilling Location）的起始地址到函数入口处的偏移量。
+
+<h3>class <code>TargetSubtarget		</code></h3>
+`TargetSubtarget`保存了一些关于和平台具体实现（例如芯片组）有关的信息。一般来说，`Subtarget`会支持或禁止一些指令，指令有具体的延迟时间或者是有特别的指令执行顺序，`TargetSubtarget`需要反映这些信息。
+
 <h3>class <code>TargetJITInfo		</code></h3>
+如果`TargetMachine`需要支持JIT的话，那么这个`TargetMachine`就需要实现方法`getJITInfo`，它将返回一个由`TargetJITInfo`派生出的具体类型的实例。JIT过程中需要的一些行为，都需要由`TargetJITInfo`的派生类提供支持，例如怎么去生成一个 _桩函数（Stub）_。(译注：Stub是JIT中一个很重要的概念。在JIT程序初始化的时候，会将每个函数都初始化成Stub。这个Stub很短很简单，他的逻辑是，当自己被调用的时候，就去找JIT Engine，为自己生成一个真正的函数体，然后把自己替换掉，以执行真正的逻辑。)
+
 <h2 id = "mcdesc_classes">用于描述机器码的类</h2>
 <h3>class MachineInstr</h3>
 <h4><code>MachineInstrBuilder.h</code>中的函数</h4>
