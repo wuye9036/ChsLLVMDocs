@@ -67,7 +67,7 @@ LLVM所提供的平台无关的代码生成器，实际上是一个Framework。�
 
 1. **描述平台特性的抽象接口（Abstract Target Description Interfaces）** 定义了一组用于描述平台特性的接口。这组接口仅用来说明平台的特性，至于它怎么被使用，接口本身并不关心。所有的接口都可在`include/llvm/Target/`中见到。   
 2. 一组表达 **生成后代码（Code being generated）** 的类。这些类保存的并不是平台相关的指令和数据，而是一些在任意平台上都有效的概念`（译注：也包括在所有平台上都能直接或间接支持的指令，比方说ADD, SUB。虽然它们在不同平台上实现完全不同。）`。例如 _常量池项（Constant Pool Entries）_ 和 _跳转表（Jump Tables）_ 这些都是在这一层体现的。代码见`include/llvm/CodeGen/`。   
-3. **MC Layer中所需要的类和算法** 。这些类和算法用来生成object file中的代码。它们能表达汇编中的内容，比方说 _标识（Label）_ ，_节（Sections）_ 和 _指令（Instructions）_ 。_跳转表_ 这些东西在这一层就已经没有了。  
+3. **MC Layer中所需要的类和算法** 。这些类和算法用来生成object file中的代码。它们能表达汇编中的内容，比方说 _标识（Label）_ ， _节（Sections）_ 和 _指令（Instructions）_ 。 _跳转表_ 这些东西在这一层就已经没有了。  
 4. 生成Native code时使用的 **平台无关的算法（Target-independent Algorithm）** 。例如 _寄存器分配（Register Allocation）_ ， _指令调度（Scheduling）_， _栈帧的表达（Stack Frame Representation）_ 这些，都是平台无关的。代码见`lib/CodeGen`。  
 5. 第五个部分是 **针对特定平台实现的平台描述接口（Implementation of the abstract target description interfaces）** 。LLVM的代码会用到这些描述，用户也能通过它专为某个平台提供特定的Passes。这些Passes和LLVM的代码一起，构成一个完整的针对特定平台的代码生成器。具体代码参见`lib/Target/`。
 6. 最后一个部分是 **平台无关的JIT组件** 。LLVM JIT本身是完全和平台没有关系的。不过有一个接口`TargetJITInfo`，可以帮助JIT处理一些平台相关的问题。JIT的平台无关部分的代码，在`lib/ExecutionEngine/JIT`。 
@@ -75,7 +75,23 @@ LLVM所提供的平台无关的代码生成器，实际上是一个Framework。�
 介绍完组件后，你可以根据自己的兴趣和需要，阅读不同的章节。一般来讲我们建议你最好熟悉一下 _平台描述（Target Descrption）_ 以及 _机器码表达(Machine Code Representation)_ 相关的内容。如果想给新平台写一个后端，那么一方面你得知道怎么去 _实现自己的平台描述_，另一方面你也需要知道 _LLVM IR是怎么写的_ 。如果你只是单纯的想实现一个新的 _代码生成算法_ ，那么你只要在 _平台描述_ 和 _机器码表达_ 相关的类里面折腾就行了。当然你得保证你的算法是可移植的。
 
 <h3>代码生成的必要组件			 </h3>
+整体上LLVM的代码生成器可以看做是两个部分，一个用于代码生成的高层接口，一个是用来为开发后端的一组可复用组件。对于用户自定义的后端，最少情况下，只需要实现 _TargetMachine_ 和 _DataLayout_ 两个接口，就可以LLVM协同工作了。当然如果后端还需要使用到代码生成器中的一些组件，那还需要实现其他的接口。
+
+这个设计有两个目的。一来这样做LLVM就可以支持非常特殊的目标平台。比如若编译目标是C语言，那诸如寄存器分配，指令选择这些传统的代码生成组件统统都不需要了。你只要实现了两个必须实现的接口，那它就能和LLVM一起工作。再比如，用户需要开发一个后端，将LLVM IR编译成GCC RTL，那也可以只实现这两个必须的接口。
+
+二来，它允许用户开发全新的、不依赖任何现有组件的代码生成器，并集成到LLVM中。当然大部分情况下，我们还是建议能复用就复用。但是目标平台如果太奇葩，没办法用LLVM的模型来描述（do not fit into the LLVM machine description model），例如给FPGA开发后端，这个设计就起作用了。
+
 <h3>代码生成器的高层设计			 </h3>
+LLVM中使用的平台无关的代码生成器，是针对标准的寄存器机设计的。同时它对效率和生成代码的质量也有一定的要求。整个代码生成可以分为以下阶段：
+
+1. **指令选择（Instruction Selection）** —
+2. **调度与格式化（Scheduling and Formation）** —
+3. **基于SSA的优化** —
+4. **寄存器分配** —
+5. **Prolog/Epilog的生成** —
+6. **机器码的晚期优化** —
+7. **发射代码（Code Emission）** —
+
 <h3>使用TableGen生成目标平台描述	 </h3>
 <h2 id = "tardesc_classes">用于描述目标的类</h2>
 <h3>class <code>TargetMachine		</code></h3>
