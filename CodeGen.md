@@ -2,8 +2,8 @@
 
 * [译序](#prolugue)
 * [介绍](#introduction)
-* [用于描述平台的类](#tardesc_classes)
-* [用于描述机器码的类](#mcdesc_classes)
+* [描述目标平台的类](#tardesc_classes)
+* [描述机器码的类](#mcdesc_classes)
 * [MC层](#mclayer)
 * [目标无关的代码生成算法](#cgalgo)
 * [Native Assembler的实现](#nativeassembler)
@@ -148,10 +148,55 @@ LLVM中使用的平台无关的代码生成器，是针对标准的寄存器机�
 <h3>class <code>TargetJITInfo		</code></h3>
 如果`TargetMachine`需要支持JIT的话，那么这个`TargetMachine`就需要实现方法`getJITInfo`，它将返回一个由`TargetJITInfo`派生出的具体类型的实例。JIT过程中需要的一些行为，都需要由`TargetJITInfo`的派生类提供支持，例如怎么去生成一个 _桩函数（Stub）_。(译注：Stub是JIT中一个很重要的概念。在JIT程序初始化的时候，会将每个函数都初始化成Stub。这个Stub很短很简单，他的逻辑是，当自己被调用的时候，就去找JIT Engine，为自己生成一个真正的函数体，然后把自己替换掉，以执行真正的逻辑。)
 
-<h2 id = "mcdesc_classes">用于描述机器码的类</h2>
-<h3>class MachineInstr</h3>
-<h4><code>MachineInstrBuilder.h</code>中的函数</h4>
-<h4>固定（预分配）的寄存器</h4>
+<h2 id = "mcdesc_classes">描述机器码的类</h2>
+简单来说，从LLVM code生成的机器码最后会由以下三个类的实例来表达， `MachineFunction`, `MachineBasicBlock`和`MachineInstr`。相关的代码可以在`include/llvm/CodeGen/`中找到。每条指令由一个 _操作码（opcode）_ 和 若干个 _参数（Operands）_ 构成。很显然这个表示方法在任何平台上都是适用的，它既能将机器代码表现成SSA Form的形式，也能在寄存器分配完成后表现非SSA形式的汇编。
+
+<h3>class <code>MachineInstr</code></h3>
+`MachineInstr`是表现目标指令的基本单元。在设计上，它是机器指令的一个非常好的抽象，它仅仅保存了 _opcode_ 和 _operands_。 _操作码_ 是一个无符号整数，具体它代表什么的指令，是由相应平台的后端来解释的。所有的 _opcode_ 都在 _*InstrInfo.td_ 中定义， _opcode_ 的枚举值是由 _td_ 文件生成的。`MachineInstr`只存储 _opcode_，但是它不关心这个 _opcode_ 的含义是什么。指令代表的意义需要到`TargetInstrInfo`中去查询。
+
+指令的 _operand_ 有多种类型，他们可能是一个寄存器（寄存器编号），一个常量（立即数）或者是一个基本块（如跳转指令的目标）。另外， _operand_ 需要标记为 _def_ 或 _use_ （译注：简单理解，def就是指令的输出，use就是指令的输入）。不过在LLVM中，只能将寄存器作为 _def_（译注：可能是出于SSA的考虑）。
+
+在指令的参数里同时有 _def_ 和 _use_ 的时候，LLVM规定要将 _def_ 放在所有 _use_ 的前面。这点和平台是无关的。即便在SPARC这样的体系上，一条指令的得写成`add %src0, %src1, %dest`的形式，在LLVM中，三个参数仍然表示为`%dest, %src0, %src1`这样的顺序。
+
+让 _目标操作数（destination or definition operands）_ 在最前面是有很多好处的，起码在调试时打印代码的时候你就能轻松打出
+
+	%dest = add %src0, %src1
+
+这般赏心悦目的代码（译注：真TM狡辩 ~）。当然，还有一个好处是在 _创建指令_ 的时候也会更加方便。（译注：我也觉得也是狡辩~）
+
+<h4>使用<code>MachineInstrBuilder.h</code>中的函数</h4>
+`include/llvm/CodeGen/MachineInstrBuilder.h`中有个函数`BuildMI`是专门用来帮助用户更加方便的生成指令。下面的代码是一个使用示例：
+
+```C++ 
+// Create a 'DestReg = mov 42' (rendered in X86 assembly as 'mov DestReg, 42')
+// instruction.  The '1' specifies how many operands will be added.
+MachineInstr *MI = BuildMI(X86::MOV32ri, 1, DestReg).addImm(42);
+
+// Create the same instr, but insert it at the end of a basic block.
+MachineBasicBlock &MBB = ...
+BuildMI(MBB, X86::MOV32ri, 1, DestReg).addImm(42);
+
+// Create the same instr, but insert it before a specified iterator point.
+MachineBasicBlock::iterator MBBI = ...
+BuildMI(MBB, MBBI, X86::MOV32ri, 1, DestReg).addImm(42);
+
+// Create a 'cmp Reg, 0' instruction, no destination reg.
+MI = BuildMI(X86::CMP32ri, 2).addReg(Reg).addImm(0);
+
+// Create an 'sahf' instruction which takes no operands and stores nothing.
+MI = BuildMI(X86::SAHF, 0);
+
+// Create a self looping branch instruction.
+BuildMI(MBB, X86::JNE, 1).addMBB(&MBB);
+```
+
+代码本身很容易懂。不过要注意的是，所有重载形式的`BuildMI`总有一个必要参数指定了 _operands_ 的数量。这是为了在给指令的分配内存的时候可以更加有效率。（译注：和vector.reserve的作用相同）。
+
+另外，示例中的添加的 _operands_ 都是以 _use_ 的形式添加的。如果想要为指令指定一个 _def_ 语义的寄存器（也就是为指令指定一个输出），可以使用以下的形式：
+
+	MI.addReg(Reg, RegState::Define);
+
+<h4>固定（预分配）寄存器</h4>
 <h4>call-clobbered寄存器</h4>
 <h4>SSA Form的机器码</h4>
 <h3>class <code>MachineBasicBlock</code></h3>
