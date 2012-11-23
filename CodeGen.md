@@ -1,8 +1,17 @@
-﻿LLVM中的目标无关(Target-Indepenent)代码生成(Code Generator)
+﻿#LLVM中目标无关(Target-Indepenent)的代码生成(Code Generator)
 
-# 译序
+* [译序](#prolugue)
+* [介绍](#introduction)
+* [用于目标描述的类](#tardesc_classes)
+* [用于机器码描述的类](#mcdesc_classes)
+* [MC层](#mclayer)
+* [目标无关的代码生成算法](#cgalgo)
+* [Native Assembler的实现](#nativeassembler)
+* [特定平台(Target-Specific)的一些注意事项](#targspec_notes)
 
-（不想看我的废话，请点击传送门直接到译文）
+----------------------------
+
+<h2 id=“prologue”>译序</h2>
 
 LLVM的名字其实弱爆了，Low Level Virtual Machine。从字面上看去它不过是一个类似于JVM的虚拟机。但是实际上这个项目自从被苹果包养之后，它已经远远超出了一个虚拟机所具有的能力。其实我觉得它压根儿就和虚拟机没什么关系，完全就是一个Compiler。
 
@@ -29,7 +38,7 @@ LLVM的IR类似于汇编，如你看到的这样。
 	  ret i32 %tmp
 	}
 
-但同时，LLVM的IR是一种SSA Form的IR。所谓SSA，即Static Single Assignment，称为*[静态单赋值](http://zh.wikipedia.org/zh-cn/%E9%9D%99%E6%80%81%E5%8D%95%E8%B5%8B%E5%80%BC%E5%BD%A2%E5%BC%8F)*。好处什么的这里不扯远，它使得LLVM IR有个重要的限制，每个值只能在定义(defined)时被赋值，之后再也不能被改变。比方说
+但同时，LLVM的IR是一种SSA Form的IR。所谓SSA，即Static Single Assignment，称为 *[静态单赋值](http://zh.wikipedia.org/zh-cn/%E9%9D%99%E6%80%81%E5%8D%95%E8%B5%8B%E5%80%BC%E5%BD%A2%E5%BC%8F)* 。好处什么的这里不扯远，它使得LLVM IR有个重要的限制，每个值只能在定义(defined)时被赋值，之后再也不能被改变。比方说
 
 	%3 = fadd %1, %2 
 	%5 = fadd %3, %4 
@@ -39,12 +48,85 @@ LLVM的IR类似于汇编，如你看到的这样。
 	%3 = fadd %1, %2
 	%3 = fadd %3, %4 
 
-就是错的，因为`%3`一旦被定义就不能被再次赋值了。这也是*静态单赋值*这个名字的由来。
+就是错的，因为`%3`一旦被定义就不能被再次赋值了。这也是 *静态单赋值* 这个名字的由来。
 
-当然，单有这个限制是没法写程序的。之所以这样做，是因为单静态赋值极大的解除了数据流分析和控制流分析的复杂度。这两类分析对于编译器优化和静态检查是关键性的技术。但是这样连输入输出都没法处理。这也是函数式编程会有Monad这样的方案的原因之一。[这里](http://www.lingcc.com/2011/08/13/11685/)是一篇单静态赋值的简介，可以解决一部分上面所提到的问题。实践中的IR是如何解决这些问题的，可以参考[LLVM Tutorial](http://llvm.org/docs/tutorial/)。
+当然，单有这个限制是没法写程序的。之所以这样做，是因为静态单赋值极大地解除了数据流分析和控制流分析的复杂度。这两类分析对于编译器优化和静态检查是关键性的技术。但是这样连输入输出都没法处理。这也是函数式编程会有Monad这样的方案的原因之一。[这里](http://www.lingcc.com/2011/08/13/11685/)是一篇单静态赋值的简介，可以解决一部分上面所提到的问题。实践中的IR是如何解决这些问题的，可以参考[LLVM Tutorial](http://llvm.org/docs/tutorial/)。
 
 从静态单赋值形式的IR到最终的汇编，有很长的路要走。你需要选择合适的机器指令；将IR中支持的相对复杂的数据类型运用各种神通转换成机器可以直接执行的数据类型；物理寄存器的分配；以及最重要、也是很多人最常挂在嘴边但是又不太了解的：编译器优化。
 
 而此篇文档，正是描述了这些技术在LLVM中的实现。
 
 废话结束，正篇开始。
+
+-----------------------------------------------------
+
+<h2 id = "introduction">介绍</h2>
+
+<h3>代码生成的必要组件			 </h3>
+<h3>代码生成器的高层设计			 </h3>
+<h3>使用TableGen生成目标平台描述	 </h3>
+<h2 id = "tardesc_classes">用于描述目标的类</h2>
+<h3>class <code>TargetMachine		</code></h3>
+<h3>class <code>DataLayout			</code></h3>
+<h3>class <code>TargetLowering		</code></h3>
+<h3>class <code>TargetRegisterInfo	</code></h3>
+<h3>class <code>TargetInstrInfo		</code></h3>
+<h3>class <code>TargetFrameInfo		</code></h3>
+<h3>class <code>TargetJITInfo		</code></h3>
+<h2 id = "mcdesc_classes">用于描述机器码的类</h2>
+<h3>class MachineInstr</h3>
+<h4><code>MachineInstrBuilder.h</code>中的函数</h4>
+<h4>固定（预分配）的寄存器</h4>
+<h4>call-clobbered寄存器</h4>
+<h4>SSA Form的机器码</h4>
+<h3>class <code>MachineBasicBlock</code></h3>
+<h3>class <code>MachineFunction</code></h3>
+<h3><code>MachineInstr Bundles</code></h3>
+<h2 id="mclayer">The 'MC' Layer</h2>
+<h3><code>MCStreamer</code> API</h3>
+<h3>class <code>MCContext</code></h3>
+<h3>class <code>MCSymbol</code></h3>
+<h3>class <code>MCSection</code></h3>
+<h3>class <code>MCInst</code></h3>
+<h2 id="gcalgo">目标无关的代码生成算法</h2>
+<h3>指令选择(Instruction Selection)</h3>
+<h4>SelectionDAGs简介</h4>
+<h4>基于SelectionDAG的指令选择流程</h4>
+<h4>创建初始的SelectionDAG</h4>
+<h4>合法化(Legalize)SelectionDAG中的类型</h4>
+<h4>合法化SelectionDAG 中的操作符</h4>
+<h4>优化SelectionDAG</h4>
+<h4>选择机器指令</h4>
+<h4>调整与格式化SelectionDAG</h4>
+<h3>基于SSA的机器码优化</h3>
+<h3>变量（值）的生存期分析</h3>
+<h4>活动变量分析</h4>
+<h4>生存期分析<h4>
+<h3>寄存器分配</h3>
+<h4>寄存器在LLVM中的表达</h4>
+<h4>虚拟寄存器到物理寄存器的映射<h4>
+<h4>处理双参数的指令</h4>
+<h4>解构SSA</h4>
+<h4>指令折叠</h4>
+<h4>LLVM自带的寄存器分配算法</h4>
+<h3>Prolog/Epilog的生成</h3>
+<h3>机器码的最终优化</h3>
+<h3>Code Emission</h3>
+<h3>用于VLIW架构的指令打包器(Packetizer)</h3>
+<h4>将指令映射成功能单元</h4>
+<h4>生成并使用Packetization Tables</h4>
+<h2>Native Assembler的实现</h2>
+<h3>指令解析(Parsing)</h3>
+<h3>处理指令别名(Instruction Alias)</h3>
+<h4>助记符别名</h4>
+<h4>指令别名</h4>
+<h3>指令匹配(Matching)</h3>
+<h2>特定平台的一些注意事项</h4>
+<h3>平台特性矩阵</h3>
+<h3>尾调用(tail call)的优化</h3>
+<h3>相邻调用(sibling call)的优化</h3>
+<h3>x86后端</h3>
+<h3>PowerPC后端</h3>
+<h3>PTX后端</h3>
+
+
