@@ -2,8 +2,8 @@
 
 * [译序](#prolugue)
 * [介绍](#introduction)
-* [用于目标描述的类](#tardesc_classes)
-* [用于机器码描述的类](#mcdesc_classes)
+* [用于描述平台的类](#tardesc_classes)
+* [用于描述机器码的类](#mcdesc_classes)
 * [MC层](#mclayer)
 * [目标无关的代码生成算法](#cgalgo)
 * [Native Assembler的实现](#nativeassembler)
@@ -26,7 +26,7 @@ LLVM是一个大的项目，有一系列的子项目如：
 
 当然还有其他诸如Polly一类优化器或者libc++这样的基础库项目。
 
-做一个编译器有很多路子。解释器也好，一遍编译也好，都算是编译器的Framework。但是随着语言机制的愈发复杂以及后端技术上的日益完善，编译器中用于语法分析和语义处理的前端和用于生成目标代码的后端的界限也越来越清晰。某种意义上，借助于中间语言（Intermediate Language，IL）或者称中间表达（Intermediate Presentation）的方法已经成为产品级编译器开发中绝对主流的技术。
+做一个编译器有很多路子。解释器也好，一遍编译也好，都算是编译器的Framework。但是随着语言机制的愈发复杂以及后端技术上的日益完善，编译器中用于语法分析和语义处理的前端和用于生成目标代码的后端的界限也越来越清晰。某种意义上，借助于中间语言（Intermediate Language，IL）或者称中间表达（Intermediate Representation, IR）的方法已经成为产品级编译器开发中绝对主流的技术。
 
 中间语言/中间表达是个很宽泛的概念。它可能是抽象语法树，也可能是SSA Form，或者是MSIL这样的伪汇编。当然汇编从学理上也可以作为IR，只不过不管是哪个平台的汇编，都和硬件关系紧密（恐怕就MMIX会好一些，所以也只有Knuth这个全球唯一的CPU），它们作为IR会带来很多的复杂度。这也正是为什么要有一个高层抽象的IR在汇编和编程语言之间，编译器把众多的前端语言（C，C++，Objective C，C#）编译成IR，再在IR上进行优化，最后再编译到多个平台（x86，x86-64，PowerPC，etc）上。
 
@@ -60,7 +60,19 @@ LLVM的IR类似于汇编，如你看到的这样。
 
 -----------------------------------------------------
 
+> 译注：本文在说 _目标平台_ 时对应的原文中的单词是 _Target_ 。为了简单起见，在不产生歧义的情况下，我会将 _Target_ 翻译成 _平台_ 。
+
 <h2 id = "introduction">介绍</h2>
+LLVM所提供的平台无关的代码生成器，实际上是一个Framework。它给提供了一些可以复用的组件，帮助用户将LLVM IR编译到特定的平台上。当然，编译目标是很灵活的，它既可以是文本形态的汇编也可以是二进制的机器码。前者一般用于静态编译器，后者则可以用于JIT。整个代码生成由以下六个部分构成：
+
+1. **描述平台特性的抽象接口（Abstract Target Description Interfaces）** 定义了一组用于描述平台特性的接口。这组接口仅用来说明平台的特性，至于它怎么被使用，接口本身并不关心。所有的接口都可在`include/llvm/Target/`中见到。   
+2. 一组表达 **生成后代码（Code being generated）** 的类。这些类保存的并不是平台相关的指令和数据，而是一些在任意平台上都有效的概念`（译注：也包括在所有平台上都能直接或间接支持的指令，比方说ADD, SUB。虽然它们在不同平台上实现完全不同。）`。例如 _常量池项（Constant Pool Entries）_ 和 _跳转表（Jump Tables）_ 这些都是在这一层体现的。代码见`include/llvm/CodeGen/`。   
+3. **MC Layer中所需要的类和算法** 。这些类和算法用来生成object file中的代码。它们能表达汇编中的内容，比方说 _标识（Label）_ ，_节（Sections）_ 和 _指令（Instructions）_ 。_跳转表_ 这些东西在这一层就已经没有了。  
+4. 生成Native code时使用的 **平台无关的算法（Target-independent Algorithm）** 。例如 _寄存器分配（Register Allocation）_ ， _指令调度（Scheduling）_， _栈帧的表达（Stack Frame Representation）_ 这些，都是平台无关的。代码见`lib/CodeGen`。  
+5. 第五个部分是 **针对特定平台实现的平台描述接口（Implementation of the abstract target description interfaces）** 。LLVM的代码会用到这些描述，用户也能通过它专为某个平台提供特定的Passes。这些Passes和LLVM的代码一起，构成一个完整的针对特定平台的代码生成器。具体代码参见`lib/Target/`。
+6. 最后一个部分是 **平台无关的JIT组件** 。LLVM JIT本身是完全和平台没有关系的。不过有一个接口`TargetJITInfo`，可以帮助JIT处理一些平台相关的问题。JIT的平台无关部分的代码，在`lib/ExecutionEngine/JIT`。 
+
+介绍完组件后，你可以根据自己的兴趣和需要，阅读不同的章节。一般来讲我们建议你最好熟悉一下 _平台描述（Target Descrption）_ 以及 _机器码表达(Machine Code Representation)_ 相关的内容。如果想给新平台写一个后端，那么一方面你得知道怎么去 _实现自己的平台描述_，另一方面你也需要知道 _LLVM IR是怎么写的_ 。如果你只是单纯的想实现一个新的 _代码生成算法_ ，那么你只要在 _平台描述_ 和 _机器码表达_ 相关的类里面折腾就行了。当然你得保证你的算法是可移植的。
 
 <h3>代码生成的必要组件			 </h3>
 <h3>代码生成器的高层设计			 </h3>
