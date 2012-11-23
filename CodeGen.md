@@ -197,6 +197,38 @@ BuildMI(MBB, X86::JNE, 1).addMBB(&MBB);
 	MI.addReg(Reg, RegState::Define);
 
 <h4>固定（预分配）寄存器</h4>
+在做代码生成的时候，都会遇到一个关键的需求，那就是在一些特定的情况下，需要给指令分配特定的寄存器。这个要求往往是特定的指令集的带来的。比如在x86下你想要执行整数除法，就必须要在`EAX`和`EDX`中加载相应的操作数。还有就是调用协议的限制（译注：比如`fastcall`和x64下的calling convention）。在这些场合中，必须要为指令生成正确的物理寄存器，并将数据拷贝到物理寄存器上（或者从物理寄存器拷贝到虚拟寄存器）。
+
+再举个栗子！下面是一段简单的LLVM的代码：
+
+	define i32 @test(i32 %X, i32 %Y) {
+	  %Z = udiv i32 %X, %Y
+	  ret i32 %Z
+	}
+
+把这段代码编译到x86上后，`div`的除数需要放到`EAX/EDX`中，而`ret`返回值则要放在`EAX`内。我们执行下`llc X.bc -march=x86 -print-machineinstrs`来看看LLVM是怎么处理的：
+
+	;; Start of div
+	%EAX = mov %reg1024           ;; Copy X (in reg1024) into EAX
+	%reg1027 = sar %reg1024, 31
+	%EDX = mov %reg1027           ;; Sign extend X into EDX
+	idiv %reg1025                 ;; Divide by Y (in reg1025)
+	%reg1026 = mov %EAX           ;; Read the result (Z) out of EAX
+
+	;; Start of ret
+	%EAX = mov %reg1026           ;; 32-bit return value goes in EAX
+	ret
+
+代码生成以后，寄存器分配阶段会合并寄存器（coalesce the registers）使用，也就是删掉一些等价的寄存器，生成以下代码：
+
+	;; X is in EAX, Y is in ECX
+	mov %EAX, %EDX
+	sar %EDX, 31
+	idiv %ECX
+	ret
+
+拷贝-合并这个方法在实践中足够通用（x86都搞的定了还能有啥搞不定的！），同时这个方案还能让 _指令选择子（instruction selector）_ 在不知道平台细节的情况下顺利工作。不过有一点要注意，就是物理寄存器的 _生命期（Lifetime）_ 越短越好。（译注：关于这个问题的简单理解，可以认为物理寄存器是稀少而高效的资源。每次使用它的时间越短，它就能在更多需要它的场合发挥作用。）所以LLVM中假设物理寄存器的生命周期一定控制在 _Basic Block_ 内。所以如果要将值在 _Basic Block_ 之间传递， **必须** 使用虚拟寄存器。
+
 <h4>call-clobbered寄存器</h4>
 <h4>SSA Form的机器码</h4>
 <h3>class <code>MachineBasicBlock</code></h3>
