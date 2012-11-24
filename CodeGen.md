@@ -197,7 +197,7 @@ BuildMI(MBB, X86::JNE, 1).addMBB(&MBB);
 	MI.addReg(Reg, RegState::Define);
 
 <h4>固定（预分配）寄存器</h4>
-在做代码生成的时候，都会遇到一个关键的需求，那就是在一些特定的情况下，需要给指令分配特定的寄存器。这个要求往往是特定的指令集的带来的。比如在x86下你想要执行整数除法，就必须要在`EAX`和`EDX`中加载相应的操作数。还有就是调用协议的限制（译注：比如`fastcall`和x64下的calling convention）。在这些场合中，必须要为指令生成正确的物理寄存器，并将数据拷贝到物理寄存器上（或者从物理寄存器拷贝到虚拟寄存器）。
+在做代码生成的时候，都会遇到一个关键的需求，那就是在一些特定的情况下，需要给指令分配特定的寄存器。这个要求往往是特定的指令集的带来的。比如在x86下你想要执行整数除法，就必须要在`EAX`和`EDX`中加载相应的操作数。还有就是调用协议的限制`（译注：比如fastcall和x64下的calling convention）`。在这些场合中，必须要为指令生成正确的物理寄存器，并将数据拷贝到物理寄存器上（或者从物理寄存器拷贝到虚拟寄存器）。
 
 再举个栗子！下面是一段简单的LLVM的代码：
 
@@ -227,20 +227,115 @@ BuildMI(MBB, X86::JNE, 1).addMBB(&MBB);
 	idiv %ECX
 	ret
 
-拷贝-合并这个方法在实践中足够通用（x86都搞的定了还能有啥搞不定的！），同时这个方案还能让 _指令选择子（instruction selector）_ 在不知道平台细节的情况下顺利工作。不过有一点要注意，就是物理寄存器的 _生命期（Lifetime）_ 越短越好。（译注：关于这个问题的简单理解，可以认为物理寄存器是稀少而高效的资源。每次使用它的时间越短，它就能在更多需要它的场合发挥作用。）所以LLVM中假设物理寄存器的生命周期一定控制在 _Basic Block_ 内。所以如果要将值在 _Basic Block_ 之间传递， **必须** 使用虚拟寄存器。
+拷贝-合并这个方法非常通用（x86都搞的定了还能有啥搞不定的！），同时它还能让 _指令选择子（instruction selector）_ 在不知道平台细节的情况下顺利工作。不过有一点要注意，就是物理寄存器的 _生命期（Lifetime）_ 越短越好。`（译注：关于这个问题的简单理解，可以认为物理寄存器是稀少而高效的资源。每次使用它的时间越短，它就能在更多需要它的场合发挥作用。）`所以LLVM中假设物理寄存器的生命周期一定控制在 _Basic Block_ 内。所以如果要将值在 _Basic Block_ 之间传递， **必须** 使用虚拟寄存器。
 
 <h4>call-clobbered寄存器</h4>
-<h4>SSA Form的机器码</h4>
+部分指令例如`call`，会在调用时 _篡改（clobber）_ 很多的寄存器`（译注：clobber的含义是在指令调用后，会使得很多寄存器失效。比方说call后的那些易失(volatile)寄存器）`。我们可以通过增加`<def, dead>`参数，记录哪些寄存器可能被篡改了。但是LLVM中的方法则是通过`MO_RegisterMask`参数，给所有 _被保留的寄存器（reserved register）_ 提供一个掩码，其它的寄存器则被认为是在调用时被修改了。
+
+<h4>SSA form的机器码</h4>
+从生成`MachineInstr`s开始，到 _寄存器分配_ 之前，`MachineInstr`一直都是以SSA-form存储的。我们将LLVM IR中的 _PHI_ 节点直接转换成机器码的 _PHI_ 节点， 所有的 _虚拟寄存器_ 也都是 _静态单赋值_ 的。
+
+在 _寄存器分配_ 之后，机器码便不再以SSA-form存储。此时所有的虚拟寄存器都被移除或被物理寄存器替代，机器码的形式更加接近本地指令的形式。`（译注：当然PHI这么高级的指令通常也要被替换掉。）`
+
 <h3>class <code>MachineBasicBlock</code></h3>
+`MachineBasicBlock`可以看成是`MachineInstr`的列表。`MachineBasicBlock`基本上与LLVM IR是对应的。每一个IR中的`BasicBlock`都对应一个或多个`MachineBasicBlock`。每个`MachineBasicBlock`都可以通过`getBasicBlock`函数获得它所属的IR`BasicBlock`。
+
 <h3>class <code>MachineFunction</code></h3>
+`MachineFunction`与LLVM IR中的`Function`一一对应。每个IR`Function`中产生出的所有`MachineBasicBlock`s都以列表的形式存储在它对应的`MachineFunction`中。除了`MachineBasicBlock`s之外，每个`MachineFunction`还保存了`MachineConstantPool`，`MachineFrameInfo`和`MachineRegisterInfo`等信息。更多的细节可以参见`include/llvm/CodeGen/MachineFunction.h`。
+
 <h3><code>MachineInstr Bundles</code></h3>
+LLVM的代码生成还可以将一串指令搞成一个`MachineInstr` _Bundles_。MI _Bundle_ 主要是给VLIW一类的架构提供一个打包的指令组，一个包中的指令数量不限，指令之间是可以并行的。它也能用来表达一些必须整包执行的指令组`（译注：这个时候Bundle内的指令不一定能并行）`，比方说 _ARM Thumb2 IT Blocks_。
+
+从概念上来讲MI _Bundle_ 应该是内嵌了一组MIs，比方说下图这个样子：
+
+	--------------
+	|   Bundle   | ---------
+	--------------          \
+		   |           ----------------
+		   |           |      MI      |
+		   |           ----------------
+		   |                   |
+		   |           ----------------
+		   |           |      MI      |
+		   |           ----------------
+		   |                   |
+		   |           ----------------
+		   |           |      MI      |
+		   |           ----------------
+		   |
+	--------------
+	|   Bundle   | --------
+	--------------         \
+		   |           ----------------
+		   |           |      MI      |
+		   |           ----------------
+		   |                   |
+		   |           ----------------
+		   |           |      MI      |
+		   |           ----------------
+		   |                   |
+		   |                  ...
+		   |
+	--------------
+	|   Bundle   | --------
+	--------------         \
+		   |
+		  ...
+
+不过在LLVM中，我们为了不改变`MachineBasicBlock`和`MachineInstr`的设计，并没有采用这种内嵌分组的方案。即便MIs逻辑上是在一个 _bundle_ 中，我们也仍然把它和其他的普通指令存放在同一个列表中，只不过 _bundled_ 的指令会被标记成`InsideBundle`， _bundle_前也会有一个特殊的`BUNDLE`指令告诉你一个 _bundle_ 开始了。
+
+> 译注：我对VLIW的结构不熟悉，也没有深究过Bundle的实现，所以这里在阅读的时候微有歧义。
+
+一般在处理`MachineInstr`的时候，整个MI _bundle_ 是做为一条 _指令(unit)_ 来处理的。`MachineBasicBlock`中的`iterator`在遇到 _bundle_ 的时候，也是 _作为一个完整的单元(as-a-single-unit)_ 直接跳过。如果你想完全的按指令遍历，可以使用`instr_iterator`，此时它会历所有的指令，包括内嵌在 _bundle_ 中的。另外，作为 _bundle_ 起始的`BUNDLE`指令，需要标记出 _bundle_ 内的指令所有使用的输入和输出寄存器。
+
+`MachineInstr`打包成 _bundle_ 的工作是在寄存器分配阶段完成的。具体来说，只有当所有SSA相关的工作，包括 _双址指令转换（Two-address pass）_、 _PHI节点清除（Phi Elimination）_ 以及 _合并拷贝操作（Copy coalescing）_ 完成后，才能确定哪些指令可以被打包到一起。在这之后，需要等虚拟寄存器到物理寄存器的转换完成之后，才能进行`BUNDLE`指令收尾工作，例如将指令添加到`BUNDLE`中，并设定`BUNDLE`指令的参数（寄存器）。之所以不放在虚拟寄存器的阶段是因为彼时`BUNDLE`指令也需要占用虚拟寄存器，它会导致虚拟寄存器的使用量加倍。
+
+> 译注：这里举个例子，比方说有一组指令共占用了四个虚拟寄存器作为输入或者输出，那么bundle之后，BUNDLE指令也引用到这四个虚拟寄存器。虚拟寄存器中保存了引用或定义它的指令的列表，这样它不仅需要保存使用它的子指令，还兼带保存了BUNDLE指令。就使得这个列表变得更长了。特别是如果寄存器所牵涉到的指令都是在 _bundle_ 中的，那这样做就几乎使得这个列表翻倍了。
+
 <h2 id="mclayer">The 'MC' Layer</h2>
+_MC Layer_的功能基本上和汇编器差不多，像什么 _常量池_， _跳转表_， _全局变量_ 这些概念它统统都没有。它能处理的，就是类似于 _标号（Label）_， _机器指令_， _Object file的节（section）_ 这些更加底层的概念。它的设计目的很明确，就是把处理好的指令输出成`.s`或者`.o`文件，以及作为`llvm-mc`这个工具的后端来处理代码的汇编和反汇编。
+
 <h3><code>MCStreamer</code> API</h3>
+`MCStreamer`是一个非常棒的汇编器接口。针对不同的输出，例如`.s`或者输出`.o`，它都需要不同的实现。它的API与汇编文件的内容是对应的，它为每个汇编文件中的 _指示字（directive）_ 都提供了一个独立的函数，例如`EmitLabel`，`EmitSymbolAttribute`，`SwitchSelection`，`EmitValue`(`.byte`, `.word`)。还有`EmitInstruction`用于将`MCInst`添加到流中。
+
+LLVM中有两个地方用到了这个接口，一个是汇编器`llvm-mc`，一个是 _代码发射（Code Emission）_ 阶段，`MC Layer`中会调用`MCStreamer`的接口把IR或机器码对象转换成`.s`或者别的什么。
+
+实现方面LLVM提供了两个基本实现，`MCAsmStreamer`输出`.s`文件，`MCObjectStreamer`输出`.o`文件。相比之下前者的实现比较简单，只要把 _指示字_ 按照文本输出就行了，而后者则有完整的汇编器功能。
+
 <h3>class <code>MCContext</code></h3>
+所有在MC阶段需要使用的数据如 _符号_ 和 _节_ 什么的都放在`MCContext`中。所以你要创建符号或者节就得和它打交道。另外这个类型不能被继承。
+
+> 译注：快看！果然Context才是王道！
+
 <h3>class <code>MCSymbol</code></h3>
+`MCSymbol`直接对应了汇编文件中的 _symbol_（或者叫 _label_）。我们将所有的符号分成两类，一类是临时符号，一类是常规符号。临时符号只是在汇编的时候会使用，等object file生成之后，这些符号就会被丢弃掉。临时符号会有特定的前缀进行区分，例如在 _MachO_ 上的前缀就是"L"。
+
+`MCSymbol`有`MCContext`产生和管理，同时在`MCContext`中，每个Symbol只有一个实例。这样`MCSymbol`之间的比较用指针就可以了。不过不同的Symbol可能会指向相同的地址，比方说看下面这个例子：
+
+	foo:
+	bar:
+	  .byte 4
+
+在这种情况下`foo`和`bar`实际上都是指向`.byte 4`同一个位置的。
+
 <h3>class <code>MCSection</code></h3>
+`MCSection`是对object file中 _section_ 的描述。因为不同对象文件的实现中节的表示方法都不一样，因此对于不同的对象它都有不同的实现，如`MCSectionMachO`，`MCSectionCOFF`，`MCSectionELF`。和MCSymbol相同， _section_ 也是由产生并且在`MCContext`内是唯一的。
+
 <h3>class <code>MCInst</code></h3>
+`MCInst`是MC阶段的机器指令。它比`MachineInstr`简单多了。虽然它的结构也是平台无关的，但是它保存的 _指令码（opcode）_ 以及一组 `MCOperand` 却都是平台相关的数据。MCOperand是一个union，它包含以下三种数据之一：立即数、目标寄存器ID或者符号表达式（`Lfoo-Lbar+42`）。符号表达式在MC阶段是由一个叫`MCExpr`的类表示。
+
+在整个MC Layer中，`MCInst`的地位很重要。无论是编码，或者打印输出，或者是汇编器和反汇编器的输入输出，它都是存储指令的唯一手段。
+
+> 译注：写到这里废话两句。这个文档中很多地方都在强调平台无关，好像一旦相关了它就是标题党一样。总结一下，LLVM的代码在以下方面都是平台无关的：
+> 1. 结构上大多是平台无关的，比方说不管什么什么平台，它的指令都可以描述成Opcode + Operands的结构。
+> 2. 大多数优化是平台无关的。
+> 3. 很多处理过程，如指令的生成（Instruction Selection）当中有很多步骤是平台无关的（这也是LLVM为什么信心满满的说未来要让所有的平台相关信息都可以写到`td`文件中）。但是这里的平台无关是有一些代价的，例如你需要给寄存器和指令提供通用而详尽的特性（用于模式匹配），尽管其中一部分描述在某些平台上是没有什么用。
+> 4. 最后就是，LLVM将很多实现与接口剥离开，比如MCStreamer。这样几乎可以让所有的逻辑都是平台无关的。
+> 5. 当然也可以雄辩说，这些实现都是针对寄存器机的共性，所以“平台无关”的说法都是扯淡。
+
 <h2 id="gcalgo">目标无关的代码生成算法</h2>
+
+
 <h3>指令选择(Instruction Selection)</h3>
 <h4>SelectionDAGs简介</h4>
 <h4>基于SelectionDAG的指令选择流程</h4>
