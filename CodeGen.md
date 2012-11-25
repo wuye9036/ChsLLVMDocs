@@ -85,7 +85,7 @@ LLVM所提供的平台无关的代码生成器，实际上是一个Framework。�
 LLVM中使用的平台无关的代码生成器，是针对标准的寄存器机设计的。同时它对效率和生成代码的质量也有一定的要求。整个代码生成可以分为以下阶段：
 
 1. **指令选择（Instruction Selection）** — 这个步骤的作用是将LLVM IR转化成目标平台的指令集。不过这个阶段产生的指令还是很原始的。它一方面借助 _虚拟寄存器（Virtual Register）_ 的概念，让目标代码仍然是SSA Form的；另一方面，为了满足平台的限制和调用协议的需要，它也使用了部分的 _物理寄存器（Physical Register）_ 。最终，LLVM IR被转化成一个由目标平台的指令所组成的 _DAG_。
-2. **调度与格式化（Scheduling and Formation）** — 耳熟能详的指令重排就是这个部分的主要工作。这个阶段将会读取DAG，并根据需要进行重新排列，最后将指令以`MachineInstr`s输出。不过虽然我们这里是单独列为一个阶段，但是实际上它和 _指令选择_ 都操作的是 _SelectionDAG_，并且两者的实现也极为接近，所以在讲算法的时候，将它和 _指令选择_ 放在一起讨论。
+2. **调度与整理（Scheduling and Formation）** — 耳熟能详的指令重排就是这个部分的主要工作。这个阶段将会读取DAG，并根据需要进行重新排列，最后将指令以`MachineInstr`s输出。不过虽然我们这里是单独列为一个阶段，但是实际上它和 _指令选择_ 都操作的是 _SelectionDAG_，并且两者的实现也极为接近，所以在讲算法的时候，将它和 _指令选择_ 放在一起讨论。
 3. **基于SSA的优化** — 在经历了指令选择和调度后，接下来就需要优化上一阶段输出的DAG。整个优化过程实际上是有很多个基于SSA的优化步骤所组成`（译注：这也是为什么要在指令选择以后仍然保持SSA Form的原因之一。）`。比方说 _模调度（modulo-scheduling）_ 和 大名鼎鼎的 _窥孔优化（peephole optimization）_ 都是可以在这个阶段执行的。
 4. **寄存器分配** — 到目前为止，我们指令的操作对象，都是在虚拟寄存器和部分的物理寄存器上的。LLVM的虚拟寄存器机制，可以看作是一个无穷大的 _虚拟寄存器文件（Virtual Register File）_。但在硬件上，指令只能去操作有限的物理寄存器，或者是内存地址。这个时候我们需要借助 _寄存器溢出（Spilling）_ 的办法，将原本是虚拟寄存器的指令参数，都落实到物理寄存器或内存地址上。
 5. **Prolog/Epilog的生成** — 当函数体的指令都生成后，就能够确定需要的堆栈大小了。这个时候我们就需要在函数前后安插一些Prolog和Epilog的代码用于分配堆栈，同时原先没有确定的堆栈位置在此时也可以算出准确的偏移。知道了这些信息，我们还可以完成_栈帧指针消除（Frame Pointer Elimination）_ 或 _堆栈打包（Stack Packing）_ 这一类的优化。
@@ -346,15 +346,87 @@ LLVM中有两个地方用到了这个接口，一个是汇编器`llvm-mc`，一�
 大部分 _指令选择子_ 的代码都是由目标描述（`*.td`）文件直接产生的。我们当然希望以后`td`文件能包办一切，但是现阶段我们还需要为指令选择子提供一些自定义的C++实现。
 
 <h4>SelectionDAGs简介</h4>
+_SelectionDAG_ 是代码的一种抽象表达。这个结构有很很多优点。它适合与一些自动化指令选择算法协同工作，比方说基于动态规划的最优模式匹配（dynamic-programming based optimal pattern matching selectors）。对于代码生成，特别是指令的调度（instruction scheduling）它也是个非常易用的结构。另外，有很多底层但是平台无关的优化，可以很方便的应用到SelectionDAG上，当然这些优化需要平台提供相应的信息。
+
+LLVM中的 _SelectionDAG_ 是一个以`SDNode`对象作为节点的 _有向无环图（DAG，Directed-Acylic-Graph）_。`SDNode`最重要的属性 _操作码（Operation Code，Opcode）_ 和 _操作数（Operands）_。前者用来表示Node是做什么的，后者是操作的参数。`include/llvm/CodeGen/SelectionDAGNodes.h`中提供了一些预定义的节点类型（Operation Node Types）。
+
+每个Node都可能使用其它节点作为输入，`SDNode`的 _operands_ 就用来保存它们所引用到的`SDNode`s，这也称作是 _边（Edges）_`（译注：确实就是DAG的一条边。）`。尽管大部分的 _运算（Operation）_ 或者说Node都只会产生（define）一个值`（译注：可理解为运算的返回值）`，但是实际上`SDNode`也可能会有多个值。比方说有一个Node是`sincos`，它就需要同时返回正弦和余弦值。对这种情况，其他节点的输入就必须要知道具体引用了它的哪一个返回值。此时 _边_ 就需要用`SDValue`而不能是简单的`SDNode`来表示。`SDValue`是一对值`<SDNode, unsigned>`，它不光指明了值的Node，还指明了它使用的是节点的第几个返回值。此外，每个值都是有类型的，所以都会有一个`MVT（Machine Value Type）`来表示它的类型。
+
+> 译注: `SDValue`在LLVM中经常作为`SDNode`的 _Reference_ 来使用；
 
 
-<h4>基于SelectionDAG的指令选择流程</h4>
+SelectionDAG有两种类型的值，分别表示 _数据流（Data Flow）_，另外一种则是表示 _控制流的依赖关系（Control Flow Dependencies）_。
+
+> 译注：这里我可能断句有点问题。不过大体上意思没差。
+> 所以，又到了举栗子的时间了！简单入门一下数据流和控制流依赖。
+> 有这么一段代码（:= 是 define 的意思）
+>	...
+>	x := ...	// 把某某表达式定义成x
+>	y := ...
+>	z := x + y
+> 那么这里的z对x就是数据流上的依赖。因为显然x一遍，z的值就变了。
+
+> 又有这么一段代码
+>	if x: z := 3 else z := 4
+> 那么这个时候z对x当然也是有依赖的。显然x变了，执行路径可能就变了，z就变化了。这是控制流上的依赖。
+> 当然对这个例子，你也可以理解成`z = cond(x, 3, 4)`，进而解释成数据流上的依赖，那当然也能行得通。
+
+如果一个值在数据上依赖于其它Node，值类型就是数据的类型，比方说是个整型或者是浮点。但是如果这个值表示的是一个控制依赖，那么我们有一个更贴切的概念 _链（chain）_ 来命名这一类关系，它在LLVM中的类型是`MVT::Other`。并且，LLVM需要为所有有 _副作用（Side-effects）_ 的Node（例如Loads，Stores，Calls，Returns）提供一个排序。所有有副作用的节点都必须要接受一个 _令牌链（token chain）_ 作为输入，并且产生一个新的链作为输出。LLVM约定，输入的令牌链作为Node的第一个输入参数（operand #0），输出的令牌链作为Node的最后一个输出。
+
+> 译注：Token Chain在实现上就是一个Node Chain。
+
+SelectionDAG有两类特殊的节点，_Entry_ 和 _Root_。_Entry_ 节点使用`ISD::EntryToken`作为 _Opcode_，而 _Root_ 节点是整个 _令牌链_ 中最后一个副作用节点。例如，如果一个函数体只有一个基本块，那`return`这个节点就是 _Root_ 节点。`
+
+> 译注：文档中没有解释这两个节点的作用。多两句嘴。 
+
+> * _Entry_是整个DAG的入口，它标出了一个代码段的起始位置。在很多分析中，它都起到了哨兵节点的作用，很多`SDValue`（例如 _Root_）在初始化的时候都是指向 _Entry_ 节点。
+> * _Root_ 作为最后一个有副作用的节点，可以逆行向上索引到所有有副作用（也可以认为是有内存操作）的节点。这样做起别名分析、Scheduling、或者是Auto-Vectorization来就会很方便。此外，对volatile的读写操作，LLVM在构建Chain的时候有一些非常有趣的行为。
+
+最后两个重要的概念，SelectionDAG分为 _合法（Legal）_ 和 _非法（illegal）_ 两种。一个 _合法_ 的DAG中，所有节点的指令和参数硬件直接支持的。比方说在32bit的PowerPC上，`i1`、`i8`、`i16`、`i64`这些类型就是 _非法_ 类型`（译注：32位PPC上就只有i32可用）`。所以说要翻译成机器直接运行的指令，得将包含了各种复杂数据类型和指令的 _非法_ DAG，通过 _类型合法化（Legalize Types）_ 和 _操作合法化（Legalize Operations）_ 两个阶段转换成一个 _合法_ 的DAG。
+
+<h4>基于SelectionDAG的指令选择过程</h4>
+基于SelectionDAG的指令选择是个很麻烦的过程，细分的话有以下几个阶段：
+
+1. 构建最初的DAG —— 首先将LLVM IR`（译注：LLVM IR在内存中也有个保存形式，和SelectionDAG不一样但是很相似）`转化成一个 _非法_ 的SelectionDAG。
+
+2. 优化构建好的SelectionDAG —— 对构建好的SelectionDAG做一些简单优化，尽量让SelectionDAG简单一些，并且把一些平台支持的元指令（meta instructions）（例如 _旋转（Rotates）_、`div/rem`指令）识别出来。这样不仅可以优化最终代码，也可以让指令选择阶段变得稍微简单一些。
+
+3. 合法化SelectionDAG类型 —— 把目标平台不支持的类型统统超度。
+
+4. 优化SelectionDAG —— 合法化阶段肯定得有一些垃圾代码，把它们都消灭。
+
+5. 合法化SelectionDAG的操作（指令） —— 超度目标平台不支持的指令。
+
+6. 优化SelectionDAG —— 再次优化，消除前个阶段的副作用。
+
+7. 指令选择 —— 指令选择子（instruction selector）会根据DAG上的操作（指令）选择合适的平台指令。这一步将会把平台无关的DAG转换成平台相关的DAG。
+
+8. SelectionDAG的调度与队列化（Scheduling and Formation） —— 最后一步是要将DAG重排成指令队列，并且发射到`MachineFunction`中。这一步LLVM使用的传统的Prepass调度算法。
+
+> 译注：解释一下调度算法：
+
+> 指令调度就是给所有的指令排个顺序（这个算法与很多优化都有关系，比方说延迟隐藏、Cache Missing Ratio之类的）。这里Prepass Scheduling是指在寄存器分配前进行指令调度。如果是指令调度在寄存器分配之后，那就成为Postpass Scheduling。
+
+>两者各有利弊。前者的问题在于，指令调度好了之后，寄存器分配时很可能会面临寄存器不够用的情况，那就得加入Spilling Code（寄存溢出代码），用内存来进行数据的周转（和虚拟内存差不多是一个道理）。这部分代码会影响到指令的延迟，这样会非常影响调度的效果。采用Postpass的方法，那就得在寄存器分配完才能进行调度，但此时就没有SSA了，依赖分析上就会差很多，指令调度就会很难做。
+
+在以上所有工作都完成后，SelectionDAG就能被销毁了，代码生成就可以进行接下来的一些工作。
+
+为了满足大家的偷窥欲，LLC提供了一些参数，将编译的中间过程可视化出来：
+
+* `-view-dag-combine1-dags` 可以显示初始构建、还没被优化的DAG。
+* `-view-legalize-dags` 可以显示在合法化之前的DAG（已经经过一些优化了）。
+* `-view-dag-combine2-dags` 可以显示第二次优化之前的DAG（已经经过一些优化了）。
+* `-view-isel-dags` 可以显示指令选择之前的DAG。
+
+如果一切OK的话，在你敲完这些命令之后稍等片刻就会弹出一个窗口把DAG给绘制出来。如果你除了错误提示别的都看不到，那可能是配置出问题了，重新按照文档配置一下LLVM吧`（译注：一般就是什么dot啊，graphviz之类的画图软件配置）`。最后，还有个命令`-view-sunit-dags`可以显示Scheduler的依赖图。这个依赖图是依据最终的SelectionDAG绘制出来。在这张图里面，我们可以知道那些指令 _bundle_ 到了一起。不过它省略了一些与指令调度无关的立即数和节点。
+
 <h4>创建初始的SelectionDAG</h4>
+
 <h4>合法化(Legalize)SelectionDAG中的类型</h4>
 <h4>合法化SelectionDAG 中的操作符</h4>
 <h4>优化SelectionDAG</h4>
 <h4>选择机器指令</h4>
-<h4>调整与格式化SelectionDAG</h4>
+<h4>队列化SelectionDAG</h4>
 <h3>基于SSA的机器码优化</h3>
 <h3>变量（值）的生存期分析</h3>
 <h4>活动变量分析</h4>
