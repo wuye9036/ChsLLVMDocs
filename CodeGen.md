@@ -386,7 +386,7 @@ SelectionDAG有两类特殊的节点，_Entry_ 和 _Root_。_Entry_ 节点使用
 > * _Entry_是整个DAG的入口，它标出了一个代码段的起始位置。在很多分析中，它都起到了哨兵节点的作用，很多`SDValue`（例如 _Root_）在初始化的时候都是指向 _Entry_ 节点。
 > * _Root_ 作为最后一个有副作用的节点，可以逆行向上索引到所有有副作用（也可以认为是有内存操作）的节点。这样做起别名分析、Scheduling、或者是Auto-Vectorization来就会很方便。此外，对volatile的读写操作，LLVM在构建Chain的时候有一些非常有趣的行为。
 
-最后两个重要的概念，SelectionDAG分为 _合法（Legal）_ 和 _非法（illegal）_ 两种。一个 _合法_ 的DAG中，所有节点的指令和参数硬件直接支持的。比方说在32bit的PowerPC上，`i1`、`i8`、`i16`、`i64`这些类型就是 _非法_ 类型`（译注：32位PPC上就只有i32可用）`。所以说要翻译成机器直接运行的指令，得将包含了各种复杂数据类型和指令的 _非法_ DAG，通过 _类型合法化（Legalize Types）_ 和 _操作合法化（Legalize Operations）_ 两个阶段转换成一个 _合法_ 的DAG。
+最后，SelectionDAG分为 _合法（Legal）_ 和 _非法（illegal）_ 两种。一个 _合法_ 的DAG中，所有节点的指令和参数类型都是目标平台直接支持的。比方说在32bit的PowerPC上，`i1`、`i8`、`i16`、`i64`这些类型就是 _非法_ 类型`（译注：32位PPC上就只有i32可用）`。所以说要翻译成机器直接运行的指令，得将包含了各种复杂数据类型和指令的 _非法_ DAG，通过 _类型合法化（Legalize Types）_ 和 _操作合法化（Legalize Operations）_ 两个阶段转换成一个 _合法_ 的DAG。
 
 <h4>基于SelectionDAG的指令选择过程</h4>
 基于SelectionDAG的指令选择是个很麻烦的过程，细分的话有以下几个阶段：
@@ -401,7 +401,7 @@ SelectionDAG有两类特殊的节点，_Entry_ 和 _Root_。_Entry_ 节点使用
 
 5. 合法化SelectionDAG的操作（指令） —— 超度目标平台不支持的指令。
 
-6. 优化SelectionDAG —— 再次优化，消除前个阶段的副作用。
+6. 优化SelectionDAG —— 再次优化，消除前个阶段带来的一些问题。
 
 7. 指令选择 —— 指令选择子（instruction selector）会根据DAG上的操作（指令）选择合适的平台指令。这一步将会把平台无关的DAG转换成平台相关的DAG。
 
@@ -425,13 +425,126 @@ SelectionDAG有两类特殊的节点，_Entry_ 和 _Root_。_Entry_ 节点使用
 如果一切OK的话，在你敲完这些命令之后稍等片刻就会弹出一个窗口把DAG给绘制出来。如果你除了错误提示别的都看不到，那可能是配置出问题了，重新按照文档配置一下LLVM吧`（译注：一般就是什么dot啊，graphviz之类的画图软件配置）`。最后，还有个命令`-view-sunit-dags`可以显示Scheduler的依赖图。这个依赖图是依据最终的SelectionDAG绘制出来。在这张图里面，我们可以知道那些指令 _bundle_ 到了一起。不过它省略了一些与指令调度无关的立即数和节点。
 
 <h4>创建初始的SelectionDAG</h4>
+SelectionDAG的创建是个基本的窥孔算法。LLVM IR经过`SelectionDAGBuilder`的处理后转换成SelectionDAG。我们希望这一阶段
+可以给SelectionDAG附加尽可能多的底层与平台相关的细节。这个Pass基本都是人肉的。你得人肉的把IR中的`add`指令转换成SelectionDAG中的`add`节点，也要把IR中的`GetElementPtr`指令人肉展开成地址的算术运算。
+
+> 译注：`GetElementPtr`是LLVM IR的指令，用于计算结构体成员或者数组元素的地址偏移量。
+
+根据平台的不同，call，return，varargs这些指令的在转换成DAG的时候都会有所差异，可以使用`TargetLowering`接口作为 _hook_实现平台相关的特性。
 
 <h4>合法化(Legalize)SelectionDAG中的类型</h4>
+
+这一步要把DAG中用到的数据的类型统统转化成被目标平台直接支持的类型。达到这个目的有两种主要途径，一个是将较小的类型转成较大的类型，即 _类型提升（promoting）_，一种是将较大的类型拆分成多个小的类型，即 _展开（Expanding）_。比方说在某些平台上只有64位浮点和32位整数的运算指令，你得把所有f32都 _提升（promoted）_ 到f64，并把i1/i8/i16都提升到i32，同时要把i64拆分成两个i32来存储。当然在提升或扩展的过程中可能会遇到一些问题，例如整型位数变化后，可能需要 _带符号扩展（signed extension）_ 或 _无符号扩展（zero extension）_。无论怎样，最终都要保证最终的指令与原始的IR行为上要完全一致。
+
+LLVM IR中有目标平台无法支持的矢量`（译注： LLVM IR还支持任意长度的 _矢量（vector）_。译注：LLVM中的矢量是为SIMD操作设计的。但是目标平台可能无法支持任意长度的矢量，例如x86上SSE的一些指令只支持4个单精度浮点的矢量。）`，LLVM也会有两种转换方案，_加宽（widening）_，即将大vector拆分成多个可以被平台支持的小vector，不足一个vector的部分补齐成一个vector`（译注：例如在x86平台上将15个f32的vector补齐成16个f32然后拆分成四个m128）`；以及 _标量化（scalarizing）_，即在不支持SIMD指令的平台上，将矢量拆成多个标量进行运算。
+
+在平台特定的`TargetLowering`实现的时候，要用`addRegisterClass`注册平台的寄存器分类及对应的数据类型。 _Legalizer_会根据这些信息来确定平台所支持的类型。
+
 <h4>合法化SelectionDAG 中的操作符</h4>
-<h4>优化SelectionDAG</h4>
+这一步将DAG中节点的操作/指令合法化成平台支持的操作。
+
+即便数据都是平台所支持的，它也不太可能提供IR中的每一条指令。例如x86中就没有 _条件赋值（conditional moves）_ 指令，PowerPC也不支持从一个16-bit的内存上以符号扩展的方式读取整数。因此，_合法化_ 阶段要将这些不支持的指令按三种方式转换成平台支持的操作： _扩展（Expansion）_，用一组指令来模拟一条操作； _提升（promotion）_ 将数据转换成更大的类型， _定制（Custom）_ 通过Hook，让用户实现合法化。
+
+在平台对应的`TargetLowering`初始化时，需调用`setOperationAction`注册不被支持的操作，并指定三种行为的一种来完成合法化。
+
+如果没有 _合法化_，那么所有的平台上的选择子都需要支持DAG中的每一条操作和所有数据类型。借助于 _合法化_，我们可以让平台间共享全部的规范化模式（cononicalized pattern）。并且因为规范化后的代码仍然是DAG的，因此优化起来也非常方便。`（译注：这里不甚明了cononicalized pattern的具体含义，因此只是直译。不过猜测此处的Pattern应该是指那些平台无关的模式匹配规则。）`
+
+<h4>SelectionDAG的优化</h4>
+在整个代码生成阶段，SelectionDAG会被优化多次。在SelectionDAG构建完成之后就需要进行首次优化，完成一些代码的清理工作（例如根据指令参数的具体类型进行的优化）。其他的几轮优化用于清除合法化带来的一些垃圾代码。有了单独的优化pass，合法化就可以不用过于操心生成的代码质量，这样就可以变得简单一些。
+
+另外在指令选择的时候，会生成一大堆的整数带符号扩展或者无符号扩展，这些代码是优化的重点。目前LLVM里面还是 _人肉（ad-hoc）处理_ 它，以后我们会该用更严谨的算法去实现，例如：
+
+“Widening integer arithmetic” 
+Kevin Redwine and Norman Ramsey 
+International Conference on Compiler Construction (CC) 2004
+
+“Effective sign extension elimination” 
+Motohiro Kawahito, Hideaki Komatsu, and Toshio Nakatani 
+Proceedings of the ACM SIGPLAN 2002 Conference on Programming Language Design and Implementation.
+
 <h4>选择机器指令</h4>
+_选择阶段（Select Phase）_ 是所有平台相关的指令选择过程的统称。这一阶段的输入是合法的SelectionDAG，通过模式匹配出平台指令，并将结果输出到一个新的DAG。考虑一下LLVM IR片段：
+
+> 译注：Legalize的阶段和Select阶段都会变换SelectionDAG中的Operation。只不过前者是将目标无关的Operation转换成目标无关但是会被平台支持的Operation，后者是将平台支持的Operation变成平台的指令。
+
+```
+%1 = fadd float %w, %x 
+%2 = fmul float %1, %y 
+%3 = fadd float %2, %z
+```
+
+这段代码对应的SelectionDAG大概是下面这样：
+
+```
+（fadd:f32 (fmul:f32 (fadd:f32 W, X), Y), Z)
+```
+
+如果目标平台支持浮点的 _乘加（multiply-and-add，FMA）_ 操作，那么此时会把add和mul指令合并到一起。在PowerPC上，输出的DAG是这样：
+
+```
+(FMADDS (FADDS W, X), Y, Z)
+```
+
+`FMADDS`是一个单精度的三元运算符，它将头两个参数相乘并加到第三个参数上。`FADDS`是一个单精度的二元加法运算符。为了执行这个模式匹配，PowerPC的后端得有这样的指令定义：
+
+```
+def FMADDS
+	: AForm_1<59, 29,
+     (ops F4RC:$FRT, F4RC:$FRA, F4RC:$FRC, F4RC:$FRB),
+      "fmadds $FRT, $FRA, $FRC, $FRB",
+      *[(set F4RC:$FRT, (fadd (fmul F4RC:$FRA, F4RC:$FRC),
+                                           F4RC:$FRB))]*>;
+def FADDS
+	: AForm_2<59, 21,
+     (ops F4RC:$FRT, F4RC:$FRA, F4RC:$FRB),
+      "fadds $FRT, $FRA, $FRB",
+      *[(set F4RC:$FRT, (fadd F4RC:$FRA, F4RC:$FRB))]*>;
+```
+
+加粗的部分就是对模式匹配的提示。所有的DAG操作/指令例如`fmul/fadd`都在`include/llvm/Target/TargetSelectionDAG.td`。`F4RC`是输出和输出的寄存器分类。
+
+TableGen会读入`.td`文件，并且生成对应的模式匹配代码。这样做有下面好处：
+
+* 编译时间`（译注：此处是指编译编译器的时间。compiler-compiler time）`内可以检查所有的指令模式并且告诉你模式是不是正确的。
+* 模式匹配时能处理对参数的任意 _约束（constraints）_。你可以很容易的描述这样的约束：“参数必须是任何13bit、带符号扩展的立即数”。作为例子，你可以参考PowerPC后端中的`immSExt16`和相应的`tblgen`类。
+* 能够识别一些重要的pattern。例如它知道加法是符合交换律的，因此它既能匹配`fadd X, (fmul Y, Z)`，也能匹配`fadd (fmul X, Y), Z`。这些都不需要用户做任何特别的处理。
+* 它有完备的类型推导能力（type-inferencing system）。大部分情况下用户可以不用显式的指定模式参数类型。`FMADDS`就不需要在tblgen中指明这个pattern是f32的。它会根据参数描述中`F4RC`这个寄存器分类推导出它只能匹配f32的数据。
+* 目标平台可以定义自己的" _模式片段（pattern fragments）_"，这是一组可复用的模式的集合。例如SelectionDAG不支持`not`操作，但是用户却能定义一个`not x`的 _模式片段_，它可以展开成`xor x, -1`。可以参见片段`not`和`ineg`的相关代码。
+* 除了指令之外，目标平台还可以通过类`Pat`指定将任意模式匹配成指令。考虑PowerPC上，无法在一条指令内，读取一个任意整型立即数到寄存器中。那么可以在`tblgen`中添加这样的pattern:
+
+```
+// Arbitrary immediate support.  Implement in terms of LIS/ORI.
+def : Pat<(i32 imm:$imm),
+          (ORI (LIS (HI16 imm:$imm)), (LO16 imm:$imm))>;
+```
+
+如果平台不能没有单指令读入立即数到寄存器的pattern，它就会用这条规则：“将一个i32立即数的读取转化成一条ORI（同16bit立即数进行或操作）和一条LIS（左移十六位）指令”。在匹配规则后，输入的立即数也会拆分成`LO16/HI16`以匹配这条规则。
+* 系统在大多数时候是自动匹配的，但是也允许你添加自定义的C++代码去处理一些非常复杂的匹配规则。
+
+当然，它也存在着不少缺陷。当然，大部分问题将在以后的开发中逐渐的完善。
+
+* 暂时还没有办法匹配有多个值的SelectionDAG节点，例如`SMUL_LOHI`, `LOAD`, `CALL`。这也是用户需要写C++代码的主要原因。
+* 对于复杂的寻址模式目前还支持的不够好。（例如x86的四参数寻址模式，目前的LLVM是用C++代码来匹配的）。以后我们会增加一些模式片段来支持这一特性。我们还有打算扩展模式片段使得一个模式片段可以支持多个不同的模式。
+* 不能自动推断标记`isStore/isLoad`。
+* 不能自动产生Legalizer需要的寄存器支持集和指令支持集。
+* 没有办法和自定义的合法化节点协同工作。（dont have a way of tying in custom legalized nodes yet.）
+
+> 译注: 两个问题有待考证： 1. 不清楚isStore和isLoad的标记（flag）有什么作用；2. 不知道自定义的合法化节点是什么样子的节点。
+
+尽管有这些问题，指令选择子产生器仍然是非常有用的，对大部分平台，它都能涵盖绝大部分的二元和逻辑指令。如果你遇到了问题或者有什么不懂的，可以与Christ联系！`（吐槽：邮件列表里面都是小弟在回。而且口气都很可怕。）`
+
 <h4>队列化SelectionDAG</h4>
+调度阶段主要将指令从DAG中提取出来并加以排序。调度器会根据平台的特性，并依据一定的规则（如最小化寄存器压力或者隐藏指令延迟）来对指令排序。在这一步完成后，DAG会被转换成`MachineInstr`的列表，SelectionDAG会随之删除。
+
+尽管这一步在逻辑上是与指令选择分离的，但是它也是在SelectionDAG进行调度和排序，因此它和指令选择阶段的关系仍然是非常紧密的。
+
+<h4>SelectionDAG的工作计划</h4>
+1. Optional function-at-a-time selection.
+2. Auto-generate entire selector from .td file.
+
 <h3>基于SSA的机器码优化</h3>
+TO BE WRITTEN
+
 <h3>变量（值）的生存期分析</h3>
 <h4>活动变量分析</h4>
 <h4>生存期分析<h4>
