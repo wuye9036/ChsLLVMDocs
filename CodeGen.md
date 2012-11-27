@@ -568,7 +568,7 @@ TO BE WRITTEN
 >   %In0 = ...
 >   ...
 > Block1:
->   %In2 = phi \[%In0, Block1] \[%In1, Block2]
+>   %In2 = phi [%In0, Block1], [%In1, Block2]
 >   ...
 > Block2:
 >   ...
@@ -592,7 +592,8 @@ TO BE WRITTEN
 
 > 此外，在存储和表达变量生存期的时候，代码和文档也略有区别，具体内容可以参见`include/llvm/CodeGen/LiveVariables.h`
 
-<h4>生存期分析（Live Intervals Analysis）<h4>
+<h4>生存期分析（Live Intervals Analysis）</h4>
+
 在获得了活动变量之后就可以进行进一步的分析。在此之前，要给所有的块和机器指令进行编号；紧接着处理 _输入值（“Live-in” values）_，它们都是物理寄存器，因此会在基本块的末尾结束生存期（killed）；如果将机器指令表示成`\[1, N]`的序列，那么虚拟寄存器的生存周期可以表示为`[i, j)`，其中 `1 <= i <= j < N`。
 
 （More to come ...）
