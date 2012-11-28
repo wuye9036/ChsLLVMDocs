@@ -551,7 +551,7 @@ TO BE WRITTEN
 > 译注：这里所说的变量（variable）通常是指值（value）。
 
 <h4>活动变量分析</h4>
-活动变量分析的第一步是清除那些定义了但是从未引用过的寄存。其次是确定最后一条引用某个虚拟寄存器指令。所有的虚拟寄存器以及参与分配的物理寄存器都需要完成活动变量分析。因为LLVM使用了SSA的表达，所以虚拟寄存器的生存期很容易分析`（译注：因为寄存器不能被写，所以生命期就很短）`。并且因为LLVM约定了物理寄存器不能跨基本块，物理寄存器的生命期只需在块内分析即可。不参与分配的寄存器，如栈指针和条件寄存器，是不跟踪其生命期的。
+活动变量分析的第一步是清除那些定义了但是从未引用过的寄存。其次是确定最后一条引用某个虚拟寄存器指令。所有的虚拟寄存器以及参与分配的物理寄存器都需要进行活动变量分析。因为LLVM是SSA的形式，所以很容易分析虚拟寄存器的生存期`（译注：因为寄存器不能被写，所以生命期就很短）`。并且因为LLVM约定了物理寄存器不能跨基本块，物理寄存器的生命期只需在块内分析即可。不参与分配的寄存器，如栈指针和条件寄存器，是不跟踪其生命期的。
 
 如果考虑到函数调用和返回（live in to or out of a function），那么物理寄存器的生命期可能会跨越函数边界。LLVM通过 _虚拟的（dummy）_ `defining`指令保留了所有 _输入寄存（live in register）_ 的生存期；如果最后一个基本块拥有`return`指令，那么函数所有的 _返回值（live out of register）_ 的生存期皆用此条指令来界定。
 
@@ -594,13 +594,47 @@ TO BE WRITTEN
 
 <h4>生存期分析（Live Intervals Analysis）</h4>
 
-在获得了活动变量之后就可以进行进一步的分析。在此之前，要给所有的块和机器指令进行编号；紧接着处理 _输入值（“Live-in” values）_，它们都是物理寄存器，因此会在基本块的末尾结束生存期（killed）；如果将机器指令表示成`\[1, N]`的序列，那么虚拟寄存器的生存周期可以表示为`[i, j)`，其中 `1 <= i <= j < N`。
+在获得了活动变量之后就可以进行进一步的分析。在此之前，要给所有的块和机器指令进行编号；紧接着处理 _输入值（“Live-in” values）_，它们都是物理寄存器，因此会在基本块的末尾结束生存期（killed）；如果将机器指令表示成`[1, N]`的序列，那么虚拟寄存器的生存周期可以表示为`[i, j)`，其中 `1 <= i <= j < N`。
 
 （More to come ...）
 
 <h3>寄存器分配</h3>
+_寄存器分配（Register Allocation）_ 是把程序从无限的虚拟寄存器机模型映射到有限的物理寄存器机模型的必要阶段。不同的平台可以使用的物理寄存器数量是不同的。通常来说，平台所提供的物理寄存器，都要远小于虚拟寄存器数量，此时需要把一些虚拟寄存器映射到内存中。这些在内存中的虚拟寄存器，我们称之为 _溢出寄存器（Spilled Virtuals）_ 。
+
 <h4>寄存器在LLVM中的表达</h4>
+每一个物理寄存器在LLVM中均有一个 1 - 1023 范围内的编号。具体的编号细节，可以在`GenRegisterNames.inc`文件中找到。例如在`lib/Target/X86/X86GenRegisterInfo.inc`中可以看到32bit的EAX寄存的编号是43，MMX寄存器`MM0`编号是65。
+
+在一些架构上，不同的寄存器名可能会共享相同的物理空间。x86中`EAX`，`AX`，`AL`就共享了8个bit。这些寄存器在LLVM中统称为 _别名（aliased）_。别名信息可以在平台的`RegisterInfo.td`中查到。通过`MCRegAliasIterator`，可以遍历所有的寄存器别名。
+
+LLVM将全部物理寄存器按照 _寄存器分类（Register Classes）_ 进行分组。每一个寄存器分类中的所有寄存器，在功能上都是等价的，彼此间可以相互替代。虚拟寄存器也有分类，而且它只能被映射到同分类的物理寄存器上。还是以x86为例，如果虚拟寄存器是8bit的，那么它也只能映射到8bit的物理寄存器上。在代码中寄存器分类是在`TargetRegisterClass`的实例中描述的。LLVM通过以下代码，判断虚拟寄存器和物理寄存器是否兼容：
+
+```C++
+bool RegMapping_Fer::compatible_class(MachineFunction &mf,
+                                      unsigned v_reg,
+                                      unsigned p_reg) {
+  assert(TargetRegisterInfo::isPhysicalRegister(p_reg) &&
+         "Target register must be physical");
+  const TargetRegisterClass *trc = mf.getRegInfo().getRegClass(v_reg);
+  return trc->contains(p_reg);
+}
+```
+
+在某些情况下，特别是调试的时候，可能需要修改可用的物理寄存器。此时可以通过修改`TargetRegsterInfo.td`。用`grep`在文件中找一下`RegisterClass`，可以看到它最后的参数是一个寄存器列表。只需要修改这些列表，就可以排除不需要的寄存器。另外，也可以显式的将寄存器排除在 _分配顺序（Allocation Order）_ 外。作为用例，你可以参考`lib/Target/X86/X86RegisterInfo.td`中的寄存器分类`GR8`。
+
+虚拟寄存器也有相应的编号。和物理寄存器不同，虚拟寄存器是没有别名的。此外，虚拟寄存器不是在`TargetRgisterInfo.td`中预定义，而是通过`MachineRegisterInfo::createVirtualRegister()`运行时分配出新的虚拟寄存器来。`IndexedMap<Foo, VirtReg2IndexFunctor>`保存了虚拟寄存器的信息。如果想遍历全部的寄存器，可以参考以下代码：
+
+```C++
+for (unsigned i = 0, e = MRI->getNumVirtRegs(); i != e; ++i) {
+  unsigned VirtReg = TargetRegisterInfo::index2VirtReg(i);
+  stuff(VirtReg);
+}
+```
+
+在寄存器分配之前除了，少数必须要用物理寄存器的情况，基本上指令的参数都使用虚拟寄存器。通过一些函数可以了解寄存器的使用情况：`MachineOperand::isRegister()`判断指令参数是不是用一个寄存器；`MachineOperand::getReg()`获得参数对应的寄存器号。此外，寄存器既可以是指令的 _输入（use）_，也可以是指令的 _输出（def）_，比方说	 `ADD reg:1026 := reg:1025 reg:1024` 就相当于 `reg:1026 = reg:1025 + reg:1024`。输入输出的信息，可以通过`MachineOperand::isUse()`和`MachineOperand::isDef()`获得。
+
 <h4>虚拟寄存器到物理寄存器的映射<h4>
+
+
 <h4>处理双参数的指令</h4>
 <h4>解构SSA</h4>
 <h4>指令折叠</h4>
