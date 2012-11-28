@@ -703,14 +703,75 @@ $ llc -regalloc=pbqp file.bc -o pbqp.s
 
 <h3>Prolog/Epilog的生成</h3>
 
+<h4>压缩的Unwind</h4>
 `（译注：这段文档好像没有写完，很混乱。Prolog和Epilog是进入和退出函数时执行的辅助代码。本节主要讨论Prolog和Epilog对异常的支持。）`
 
-如果函数体内需要处理异常，那么在退出函数的时候，需要执行一段叫Unwinding的代码完成清理。
+如果函数体内需要处理异常，那么在退出函数的时候，需要执行一段叫Unwinding的代码完成清理。Unwinding需要一些栈帧信息，其中一种常见的信息格式成为DWARF。但是DWARF最初是设计给调试器的，每个函数的 _帧描述（Frame Description Entry，FDE）_ 都有20-30个字节之多。并且它在运行时需要根据函数内的地址查找FDE，这也是一比不小的开销。因此LLVM使用了一种称为Compact Unwind的格式将每个函数的开销降低到四个字节。
+
+Compact Unwind是一个32位的编码，根据平台会有不同的编码方式。它保存了在异常发生后需要恢复的寄存器和恢复数据的来源，以及如何Unwind出函数。链接器（Linker）在创建最终可执行文件的时候，会增加`__TEXT`和`__unwind_info`两个段（section)。任何函数，只要有Compact Unwind，Unwind数据都会被编码到这两个段中。两个段都很小，而且在运行时通过函数查找Unwind数据的速度也很快。如果是完整的DAWRF Unwind信息，那么所有的FDE都被保存在`__TEXT`和`__eh_frame`段中，`__TEXT`和`__unwind_info`只保存FDE的偏移。
+
+对于x86来说，有三种Compact Unwind编码模式：
+
+1. **具有栈帧指针的函数（`EBP`/`RBP`）**。有`xBP`指针的函数，在调用的时候会在返回地址之后将栈顶指针压栈，然后再将`xSP`赋值给`xBP`。因此在Unwind的时候，要将`xSP`恢复成`xBP`并将`xBP`从栈中弹出。此外，还要从`xBP-4`到`xBP-1020`的堆栈范围内恢复所有的 _非易失性存储器（non-volatile registers）_。其偏移量在32位上除以4，或64位上除以8后，编码到16-23bit中（对应掩码是`0x00FF0000`）。需要保存的寄存器按照3个bit一个寄存器号，编码到0-14bit（对应掩码是0x00007FFF）。下表为寄存器号的对照表：
+
+<table class="table table-bordered table-striped table-condensed">
+   <tr>
+      <th>Compact Number</th>
+      <th>i386 Register</th>
+      <th>x86-64 Register</th>
+   </tr>
+   <tr>
+      <td>1</td>
+      <td>EBX</td>
+      <td>RBX</td>
+   </tr>
+   <tr>
+      <td>2</td>
+      <td>ECX</td>
+      <td>R12</td>
+   </tr>
+   <tr>
+      <td>3</td>
+      <td>EDX</td>
+      <td>R13</td>
+   </tr>
+   <tr>
+      <td>4</td>
+      <td>EDI</td>
+      <td>R14</td>
+   </tr>
+   <tr>
+      <td>5</td>
+      <td>ESI</td>
+      <td>R15</td>
+   </tr>
+   <tr>
+      <td>6</td>
+      <td>EBP</td>
+      <td>RBP</td>
+   </tr>
+</table>
+
+2. **无栈帧，函数的堆栈大小固定且较小的（不使用`xBP`保存堆栈指针）**。此种情况下在函数返回时直接向`xSP`加上一个地址偏移。此时所有的非易失性存储器都紧邻地址保存。堆栈大小（仍然是除以4或除以8）保存在16-23bit。因此这一模式仅支持1024字节（32bit）或2048字节（64bit）以内的堆栈大小。保存的寄存器数量编码到9-12bit（掩码为`0x00001C00`）。0-9bit（掩码为`0x000003FF`）按顺序编码了保存的寄存器。（具体的编码算法可以参见`lib/Target/X86FrameLowering.cpp`中的`encodeCompactUnwindRegistersWithoutFrame()`）。
+
+3. **无栈帧，函数的堆栈大小固定且较大（不使用`xBP`保存堆栈指针）**。此种情况与上一种情形类似，但是堆栈太大不能编码到Unwind中。因此在Prolog中，插入了一条`subl $nnnnn, %esp`的指令。Compact Unwind将`$nnnnn`的偏移量保存在9-12bit中（掩码0x00001C00）。
 
 <h3>机器码的最终优化</h3>
 TO BE WRITTEN
 
 <h3>Code Emission</h3>
+简单来说，_代码发射_ 就是将 _MachineFunction_ 和 _MachineInstr_ 等通过 MC Layer 的API（`MCInst`，`MCStreamer`等）输出出去。它可能由以下几个类来完成：平台无关的`AsmPrinter`，平台相关的`AsmPrinter`的子类（如`SparcAsmPrinter`）,以及`TargetLoweringObjectFile`。
+
+因为MC Layer工作在Object file一级上，因此它已经没有了函数、全局变量的概念。在MC Layer中，你需要和 _标签（labels）_、 _指示字（directives）_ 和 _指令（instructions)_ 打交道。前文也提到过，MC Layer中最终要的API类是`MCStreamer`。因此只要选择不同的实现，使用`MCStreamer`提供的接口如`EmitLabel`来发射每一条指示字就可以了。
+
+如果你需要为你的平台开发代码生成器，那么以下三个部分是你必须要实现的：
+
+1. 你需要为你的平台提供一个`AsmPrinter`的子类。这个类需要将`MachineFunction`转化成对MC Label的构造。`AsmPrinter`其实已经提供了大多数可以复用的代码，你只需要重写一部分即可。如果你需要为你的平台实现ELF，COFF或者MachO这些格式，那也是非常容易的。你可以从`TargetLoweringObjectFile`中复用大量的公共逻辑。
+2. 为平台实现指令打印的功能（instruction printer）。指令打印接受`MCInst`，并以文本形式输出到raw_ostream中。大部分逻辑可以在`.td`中直接定义出来，比方说像`add $dst, $src1, $src2`这样，但是你仍然需要去实现参数（operands）打印的部分。
+3. 你还需要将`MachineInstr`转化成`MCInst`。这一过程一般在`<target>MCInstLower.cpp`文件中实现。向底层转化的过程通常是平台相关的，而且也需要将跳转表、常量池索引、全局变量地址等这些上层的概念统统转化成对应的`MCLable`。这一步也需要将一些伪指令（pseudo ops）用真正的机器指令替代。最终生成的`MCInst`，就可以用来编码或打印成文本形式的汇编。
+
+如果你想直接支持`.o`文件的输出，或者实现自己的汇编器，你也可以选择实现一个`MCCodeEmitter`。它的任务是将`MCInst`转化成字节流（code bytes）并进行定位（relocations）。
+
 <h3>用于VLIW架构的指令打包器(Packetizer)</h3>
 <h4>将指令映射成功能单元</h4>
 <h4>生成并使用Packetization Tables</h4>
@@ -720,7 +781,10 @@ TO BE WRITTEN
 <h4>助记符别名</h4>
 <h4>指令别名</h4>
 <h3>指令匹配(Matching)</h3>
+
 <h2>特定平台的一些注意事项</h4>
+`译注：这一块随着版本变化一直在变，而且也没什么难理解的部分，就容许我偷个懒，不做翻译啦。`
+
 <h3>平台特性矩阵</h3>
 <h3>尾调用(tail call)的优化</h3>
 <h3>相邻调用(sibling call)的优化</h3>
