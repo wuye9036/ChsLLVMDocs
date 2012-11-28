@@ -632,15 +632,84 @@ for (unsigned i = 0, e = MRI->getNumVirtRegs(); i != e; ++i) {
 
 在寄存器分配之前除了，少数必须要用物理寄存器的情况，基本上指令的参数都使用虚拟寄存器。通过一些函数可以了解寄存器的使用情况：`MachineOperand::isRegister()`判断指令参数是不是用一个寄存器；`MachineOperand::getReg()`获得参数对应的寄存器号。此外，寄存器既可以是指令的 _输入（use）_，也可以是指令的 _输出（def）_，比方说	 `ADD reg:1026 := reg:1025 reg:1024` 就相当于 `reg:1026 = reg:1025 + reg:1024`。输入输出的信息，可以通过`MachineOperand::isUse()`和`MachineOperand::isDef()`获得。
 
-<h4>虚拟寄存器到物理寄存器的映射<h4>
+在寄存器分配之前就已经占用的物理寄存器，我们称为_预着色寄存器（pre-colored registers）_。这些寄存器之前我们提到过，主要用在函数参数的寄存器传递、返回值、以及一些特殊的指令上。预着色寄存器可能是 _隐式定义（implicitly defined）_ 的，也可能是 _显式定义（explicitly defined）_的。显式定义的寄存器就是指令的参数，可以通过`MachineInstr::getOperand(int)::getReg()`来获取。隐式定义的寄存器，则需要通过`TargetInstrInfo::get(opcode)::ImplicitDefs`来获得。隐式和显式的预着色寄存器定义主要区别在前者是在定义指令的时候静态指定的，而后者会根据程序而有所变化。举个例子，`call`指令就是典型的隐式寄存器定义，因为它始终占用同样的寄存器。通过`TargetInstrInfo::get(opcode)::ImplicitUses`，可以查找指令隐式的定义了哪些物理寄存。注意，不管用什么寄存器分配算法，预着色的寄存器都是要强制满足的。只要预着色的寄存器还在使用中（alive），它们就不能被虚拟寄存器的值所覆盖。
 
+<h4>虚拟寄存器到物理寄存器的映射</h4>
+实现虚拟寄存到物理寄存或 _内存插槽（memory slot）_的映射 有两种方案，_直接映射（direct mapping）_ 和 _间接映射（indirect mapping）_。前者使用`TargetRegisterInfo`和`MachineOperand`中的API即可，后者则需要`VirtRegMap`以正确的插入读写指令实现内存调度。
+
+对寄存器分配器算法的开发者来说，直接映射要更加灵活。但是它的实现相对复杂，也比较容易出错。用户需要自行插入内存的操作指令，以处理虚拟寄存器在内存中的映射。开发者需要用到的API有: `MachineOperand::setReg(physicalReg)`建立虚拟寄存器和物理寄存器之间的映射；`TargetInstrInfo::storeRegToStackSlot(...)`将虚拟寄存器保存到内存中；`TargetInstrInfo::loadRegFromStackSlot`从内存中读出虚拟内存的值。
+
+间接映射的API可以帮助开发者从内存存取的细节中解脱出来。用户只需要通过`VirtRegMap::assginVirt2Phys(virtualReg, physicalReg)`建立物理寄存器和虚拟寄存器的映射，或者将`VirtRegMap::assignVirt2StackSlot(virtualReg)`将虚拟寄存器映射到内存中即可。你还可以通过`VirtRegMap::assignVirt2RegSlot(virtualReg, stackLocation)`强制将虚拟寄存器映射到某个内存地址上。
+
+不过有一点需要强调，即便将虚拟寄存器映射到内存上，实际指令在执行的时候，往往还是要先读到物理寄存器当中的`（译注：特别是一些RISC架构的CPU）`。这个时候我们可以假设，LLVM是先把物理寄存器的值保存下来，然后读入虚拟寄存器的值，执行指令，再把虚拟寄存器的值保存好了，最后恢复物理寄存器的现场。`（译注：这个时候寄存器分配算法如果比较好的话，会有空余的物理寄存器，就没必要这么纠结了。）`
+
+如果用户使用了LLVM提供的间接映射将虚拟寄存器映射到物理寄存器或内存上，那么就需要 _溢出代码（spiller object）_ 插入一些内存读写指令。所有映射到内存上的虚拟寄存器都会在定义的时候把值写到内存中，到引用的时候再读出来。溢出代码在实现的时候是经过优化的，以避免不必要的读写。`lib/CodeGen/RegAllocLinearScan.cpp`中的`RegAllocLinearScan::runOnMachineFunction`演示了溢出代码的典型用法。
 
 <h4>处理双参数的指令</h4>
+除了少数Call这样的指令外，LLVM大部分的机器指令都是三参数的（通常是两个参数一个返回值）。但是大部分的硬件指令都是双参数。其中一个参数既是输入，同时也是输出。例如x86中的`ADD %EAX, %EBX`实际上等价于`%EAX = %EAX + %EBX`。
+
+所以LLVM在寄存器分配前，有一个独立的Pass`TwoAddressInstructionPass`将三参数指令转换成双参数的形式。例如`%a = ADD %b %c`会被转换成下面的代码：
+
+```
+%a = MOV %b 
+%a = ADD %a %c 
+```
+
+从例子中可以知道，经过双参数转换后的指令就不再是SSA的形式了。此外还要注意的是，第二条指令在实现中实际表达为`ADD %a[def/use] %c`，说明参数`%a`既是输入，也是输出。
+
 <h4>解构SSA</h4>
+在寄存器分配阶段，需要将SSA形式的代码进行 _解构（SSA Deconstruction Phase）_。SSA是个好东西，分析方便，优化方便。但是硬件没办法直接执行它，最起码一个Phi节点/指令，就让硬件嗝屁了。所以要让SSA执行起来，首当其冲就是既要维持原有代码的行为，又要清理掉其中的Phi节点。
+
+清理Phi指令的办法有很多。最传统的、也是LLVM使用的方法，就是用 _拷贝（Copy）指令_ 替换Phi指令。具体实现可以参阅`lib/CodeGen/PHIElimination.cpp`。不过在清理Phi指令之前，先要为每一条Phi指令都分配一个PHIEliminationID。
+
 <h4>指令折叠</h4>
+_指令折叠（Instruction Folding）_ 是一个优化，目的是移除多余的拷贝指令。例如下段代码
+
+```
+%EBX = LOAD %mem_address
+%EAX = COPY %EBX
+```
+可以被安全的优化成
+
+```
+%EAX = LOAD %mem_address
+```
+
+`TargetRegisterInfo::foldMemoryOperand(...)`提供了具体的优化算法。在执行指令折叠的时候必须要小心谨慎，折叠后的指令有可能与原先指令完全不同。`lib/CodeGen/LiveIntervalAnalysis.cpp`中的`LiveIntervals::addIntervalsForSpills`是指令折叠的一个范例。
+
 <h4>LLVM自带的寄存器分配算法</h4>
+LLVM为应用程序开发者提供了以下几种寄存器分配算法：
+
+* _Fast_ —— Debug版本中默认的寄存器分配算法。它在基本块层面上处理寄存器分配，尽可能保留寄存器的值，并且在适当的时候才复用寄存器。
+* _Basic_ —— Basic是增量的寄存器分配算法。它通过一个启发式（Heuristics）算法按一定顺序分配给寄存器生存期。因为这一算法可以在运行时进行调整，因此它可以允许以扩展的形式开发一些非常有趣的寄存器分配方案。虽然这个算法作为产品级算法还不够称职，但是它可以用来作为正确性和性能的评价基准。
+* _Greedy_ —— 贪心（Greedy）算法是LLVM默认的寄存器分配算法。它可以看成是Basic算法将变量生存期进行分裂（splitting global live range）后高度优化的版本。贪心算法大大减少了 _溢出代码_ 带来的成本。
+* _PBQP_ —— 这个看起来很专业的名字来自于 _Partitional Boolean Quadratic Programming_ 的缩写。它将寄存器分配描述为一个分区布尔二次规划的问题，解算PBQP后，将结果用于寄存器分配。
+
+> 译注：
+
+> 1. PBQP是规划算法的一类，相关资料可以参见 http://www.complang.tuwien.ac.at/scholz/pbqp.html
+> 2. 关于PBQP在寄存器分配中的应用，可以参见此篇 http://pp.info.uni-karlsruhe.de/uploads/publikationen/buchwald11cc.pdf
+> 3. 其实寄存器规划是个大问题。教科书上通常会将寄存器分配转化为相交图（Interference Graph）上的节点着色算法。K着色问题本身是NP完全问题，而且因为物理寄存器数量较少，经常需要溢出到内存。最小化溢出代价也是个NP完全问题。
+> 4. Basic算法根据实现，应接近Poletto和Sarkar提出的线性扫描算法（Linear Scan）。它实际上是图着色的简化。
+> 5. 最后，关于SSA的寄存器分配问题，在2005年证明了SSA表达下的相交图是弦图（Chordal Graph）。弦图有个非常重要的性质，就是它可以在多项式时间内着色。
+
+通过llc的参数，可以指定不同的寄存器分配算法：
+
+```sh
+$ llc -regalloc=basic file.bc -o ln.s
+$ llc -regalloc=fast file.bc -o fa.s
+$ llc -regalloc=pbqp file.bc -o pbqp.s
+```
+
 <h3>Prolog/Epilog的生成</h3>
+
+`（译注：这段文档好像没有写完，很混乱。Prolog和Epilog是进入和退出函数时执行的辅助代码。本节主要讨论Prolog和Epilog对异常的支持。）`
+
+如果函数体内需要处理异常，那么在退出函数的时候，需要执行一段叫Unwinding的代码完成清理。
+
 <h3>机器码的最终优化</h3>
+TO BE WRITTEN
+
 <h3>Code Emission</h3>
 <h3>用于VLIW架构的指令打包器(Packetizer)</h3>
 <h4>将指令映射成功能单元</h4>
