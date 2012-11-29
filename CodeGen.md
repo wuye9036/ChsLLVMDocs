@@ -643,7 +643,7 @@ for (unsigned i = 0, e = MRI->getNumVirtRegs(); i != e; ++i) {
 
 不过有一点需要强调，即便将虚拟寄存器映射到内存上，实际指令在执行的时候，往往还是要先读到物理寄存器当中的`（译注：特别是一些RISC架构的CPU）`。这个时候我们可以假设，LLVM是先把物理寄存器的值保存下来，然后读入虚拟寄存器的值，执行指令，再把虚拟寄存器的值保存好了，最后恢复物理寄存器的现场。`（译注：这个时候寄存器分配算法如果比较好的话，会有空余的物理寄存器，就没必要这么纠结了。）`
 
-如果用户使用了LLVM提供的间接映射将虚拟寄存器映射到物理寄存器或内存上，那么就需要 _溢出代码（spiller object）_ 插入一些内存读写指令。所有映射到内存上的虚拟寄存器都会在定义的时候把值写到内存中，到引用的时候再读出来。溢出代码在实现的时候是经过优化的，以避免不必要的读写。`lib/CodeGen/RegAllocLinearScan.cpp`中的`RegAllocLinearScan::runOnMachineFunction`演示了溢出代码的典型用法。
+如果用户使用了LLVM提供的间接映射将虚拟寄存器映射到物理寄存器或内存上，那么就需要 _溢出代码（spiller object）_ 插入一些内存读写指令。所有映射到内存上的虚拟寄存器都会在定义的时候把值写到内存中，到引用的时候再读出来。溢出代码在实现的时候是经过优化的，以避免不必要的读写。`lib/CodeGen/RegAllocBasic.cpp`中的`RegAllocBasic::runOnMachineFunction`演示了溢出代码的典型用法。
 
 <h4>处理双参数的指令</h4>
 除了少数Call这样的指令外，LLVM大部分的机器指令都是三参数的（通常是两个参数一个返回值）。但是大部分的硬件指令都是双参数。其中一个参数既是输入，同时也是输出。例如x86中的`ADD %EAX, %EBX`实际上等价于`%EAX = %EAX + %EBX`。
@@ -773,14 +773,95 @@ TO BE WRITTEN
 如果你想直接支持`.o`文件的输出，或者实现自己的汇编器，你也可以选择实现一个`MCCodeEmitter`。它的任务是将`MCInst`转化成字节流（code bytes）并进行定位（relocations）。
 
 <h3>用于VLIW架构的指令打包器(Packetizer)</h3>
+在超长指令字（VLIW，Very Long Instruction Word）架构中，编译器需要根据架构将指令打包成功能单元（functional units），这些功能单元也称作。LLVM提供了一个平台无关的VLIW打包器来完成这一功能。
+
 <h4>将指令映射成功能单元</h4>
+在VLIW体系上，多条指令会被映射到多个单元上。在打包指令之前，编译器需要确定哪些指令是可以被分在一组的。理论上来讲这个算法的复杂度非常高。
+
+`（译注：如果我没记错，最优分组也是个NP完全的问题。）`
+
+为了降低打包算法的复杂度，VLIW预先要分析所有的指令类型（instruction classes）并建立一个用于判断指令是否适合某个包的查找表，即Packetization Table。
+
 <h4>生成并使用Packetization Tables</h4>
+打包器首先会从平台的信息中获取指令的全部类型，然后创建一个和表示包状态的有限自动机（Deterministic Finite Automaton，DFA）。DFA由三种元素构成，输入（Inputs），状态（States）和状态转移（Transitions）。所有的输入均用来表示已经被加到Packet中的指令；状态表示当前功能单元中指令的耗费（Comsumption）；在尝试加入指令后，会导致状态转移。根据状态转移是否成立，可以判断指令能否加入到包中。
+
+为了建立平台的打包状态机，可以将平台对应的`<Target>GenDFAPacketizer.inc`增加到编译链中。用户需要三个接口：`DFAPacketizer：：clearResources()`，`DFAPacketizer：：reserveResources(MachineInstr* MI)`以及`DFAPacketizer：：canReserveResources(MachineInstr* MI)`。打包器会调用这三个接口来确定指令是否可以加入到打包其中。具体内容可以参见`llvm/CodeGen/DFAPacketizer.h`。
+
 <h2>Native Assembler的实现</h2>
+虽然说整篇文档大部分是针对编译器后端的开发，但是LLVM也提供了完整的汇编器开发的支持。我们已经为`.td`文件到汇编文件的自动转换做了大量工作。这也意味着，编译器和汇编器之间共享了大部分的数据和操作。
+
 <h3>指令解析(Parsing)</h3>
+
+TO BE WRITTEN
+
 <h3>处理指令别名(Instruction Alias)</h3>
-<h4>助记符别名</h4>
+
+在指令解析后，就进入了`MatchInstructionImpl`函数。这个函数会先处理别名，然后再做匹配。
+
+别名处理是将同一个指令的不同文本统一成单一表达的过程。下文我们从简单到复杂，列出了一些常见的别名处理过程。我们建议你尽量选择简单的别名处理方案。
+
+<h4>助记符别名（Mnemonic Aliases）</h4>
+别名处理的第一个阶段是将指令助记符映射到其它的助记符上。这个阶段非常简单，只是基本的文本替换和映射而已，不需要去处理参数等其它的问题。助记符别名的定义也非常直白，下段代码即是截取自x86的助记符别名定义：
+
+```
+def : MnemonicAlias<"cbw",     "cbtw">;
+def : MnemonicAlias<"smovq",   "movsq">;
+def : MnemonicAlias<"fldcww",  "fldcw">;
+def : MnemonicAlias<"fucompi", "fucomip">;
+def : MnemonicAlias<"ud2a",    "ud2">;
+```
+
+根据`MnemonicAlias`重新映射助记符是非常简单的。尽管`MnemonicAlias`在映射助记符的时候不需要查看具体的指令及其参数的内容，但是它仍然可以根据一些全局状态选择定义，比如下面的例子：
+
+```
+def : MnemonicAlias<"pushf", "pushfq">, Requires<[In64BitMode]>;
+def : MnemonicAlias<"pushf", "pushfl">, Requires<[In32BitMode]>;
+```
+
 <h4>指令别名</h4>
+
+指令别名出来是一种更加通用化的处理过程。它会根据匹配到的指令输出全新的指令。指令别名包含两个部分：需要匹配的字符串，以及输出指令。仍然以x86为例子：
+
+```
+def : InstAlias<"movsx $src, $dst", (MOVSX16rr8W GR16:$dst, GR8  :$src)>;
+def : InstAlias<"movsx $src, $dst", (MOVSX16rm8W GR16:$dst, i8mem:$src)>;
+def : InstAlias<"movsx $src, $dst", (MOVSX32rr8  GR32:$dst, GR8  :$src)>;
+def : InstAlias<"movsx $src, $dst", (MOVSX32rr16 GR32:$dst, GR16 :$src)>;
+def : InstAlias<"movsx $src, $dst", (MOVSX64rr8  GR64:$dst, GR8  :$src)>;
+def : InstAlias<"movsx $src, $dst", (MOVSX64rr16 GR64:$dst, GR16 :$src)>;
+def : InstAlias<"movsx $src, $dst", (MOVSX64rr32 GR64:$dst, GR32 :$src)>;
+```
+
+这个例子充分展示了指令别名的作用，它可以为同样助记符的指令，根据其参数输出成不同的指令。实际上用于别名匹配的参数在数量和顺序上，都不需要与原指令对应，它也可以是下面这样：
+
+```
+def : InstAlias<"clrb $reg", (XOR8rr  GR8 :$reg, GR8 :$reg)>;
+def : InstAlias<"clrw $reg", (XOR16rr GR16:$reg, GR16:$reg)>;
+def : InstAlias<"clrl $reg", (XOR32rr GR32:$reg, GR32:$reg)>;
+def : InstAlias<"clrq $reg", (XOR64rr GR64:$reg, GR64:$reg)>;
+```
+
+这里例子现实了绑定的参数只需要列出一次即可。在x86中，`XOR8rr`使用了两个`GR8`作为输入，并输出到一个`GR8`中。`InstAliases`使用了展平的寄存器列表（flattend operand list），不需要对绑定参数进行重复`（译注：这句话没看懂。）`。别名处理的输出指令也可以使用立即数或者固定寄存器，如下所示：
+
+```C++
+// Fixed Immediate operand.
+def : InstAlias<"aad", (AAD8i8 10)>;
+
+// Fixed register operand.
+def : InstAlias<"fcomi", (COM_FIr ST1)>;
+
+// Simple alias.
+def : InstAlias<"fcomi $reg", (COM_FIr RST:$reg)>;
+```
+
+此外，别名分析也支持`Requires`语句（Clause）过滤针对特定平台的匹配规则。
+
+只要后端定义了相应的别名处理规则，指令打印（Instruction Printer）就可以自动输出别名处理后的代码。使用这一办法处理别名非常简单，代码的可读性也非常好。如果需要打印出处理前的别名，可以在定义`InstAlias`的时候，第三个参数填上`“0”`。
+
+
 <h3>指令匹配(Matching)</h3>
+
+TO BE WRITTEN
 
 <h2>特定平台的一些注意事项</h2>
 `译注：这一块随着版本变化一直在变，而且也没什么难理解的部分，就容许我偷个懒，不做翻译啦。`
