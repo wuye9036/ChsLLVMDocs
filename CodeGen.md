@@ -275,7 +275,9 @@ BuildMI(MBB, X86::JNE, 1).addMBB(&MBB);
 `MachineFunction`与LLVM IR中的`Function`一一对应。每个IR `Function`中产生出的`MachineBasicBlock`都以列表的形式存储在它对应的`MachineFunction`中。除了`MachineBasicBlock`之外，每个`MachineFunction`还保存了`MachineConstantPool`，`MachineFrameInfo`和`MachineRegisterInfo`等信息。更多的细节请参见`include/llvm/CodeGen/MachineFunction.h`。
 
 <h3><code>MachineInstr Bundles</code></h3>
-LLVM的代码生成还可以将一串指令搞成一个`MachineInstr` _Bundles_。MI _Bundle_ 主要是给VLIW一类的架构提供一个打包的指令组，一个包中的指令数量不限，指令之间是可以并行的。它也能用来表达一些必须整包执行的指令组`（译注：这个时候Bundle内的指令不一定能并行）`，比方说 _ARM Thumb2 IT Blocks_。
+LLVM的代码生成器还可以将一串指令打包成一个`MachineInstr` _Bundle_。MI _Bundle_ 主要是给VLIW架构提供一个指令组。每个包中的指令数量不限，指令之间是可以并行的。它也能用来表达一些必须整包执行的指令组如 _ARM Thumb2 IT Blocks_。
+
+> 译注： 整包执行的时候，Bundle内的指令不一定被要求可并行。
 
 从概念上来讲MI _Bundle_ 应该是内嵌了一组MIs，比方说下图这个样子：
 
@@ -317,21 +319,21 @@ LLVM的代码生成还可以将一串指令搞成一个`MachineInstr` _Bundles_�
 
 > 译注：我对VLIW的结构不熟悉，也没有深究过Bundle的实现，所以这里在阅读的时候微有歧义。
 
-一般在处理`MachineInstr`的时候，整个MI _bundle_ 是做为一条 _指令(unit)_ 来处理的。`MachineBasicBlock`中的`iterator`在遇到 _bundle_ 的时候，也是 _作为一个完整的单元(as-a-single-unit)_ 直接跳过。如果你想完全的按指令遍历，可以使用`instr_iterator`，此时它会历所有的指令，包括内嵌在 _bundle_ 中的。另外，作为 _bundle_ 起始的`BUNDLE`指令，需要标记出 _bundle_ 内的指令所有使用的输入和输出寄存器。
+一般在处理`MachineInstr`时会将整个MI _bundle_ 作为一条 _指令(unit)_ 处理，`MachineBasicBlock`中的`iterator`在遇到 _bundle_ 的时候，也是 _作为一个完整的单元(as-a-single-unit)_ 直接跳过。如果想完全按指令遍历可以使用`instr_iterator`，此时它会历包括内嵌在 _bundle_ 中的所有指令。 _bundle_ 起始处会有一个特殊的`BUNDLE`指令，这条指令需要标记出 _bundle_ 内所有指令的输入和输出寄存器。
 
-`MachineInstr`打包成 _bundle_ 的工作是在寄存器分配阶段完成的。具体来说，只有当所有SSA相关的工作，包括 _双址指令转换（Two-address pass）_、 _PHI节点清除（Phi Elimination）_ 以及 _合并拷贝操作（Copy coalescing）_ 完成后，才能确定哪些指令可以被打包到一起。在这之后，需要等虚拟寄存器到物理寄存器的转换完成之后，才能进行`BUNDLE`指令收尾工作，例如将指令添加到`BUNDLE`中，并设定`BUNDLE`指令的参数（寄存器）。之所以不放在虚拟寄存器的阶段是因为彼时`BUNDLE`指令也需要占用虚拟寄存器，它会导致虚拟寄存器的使用量加倍。
+`MachineInstr`打包成 _bundle_ 的工作在寄存器分配阶段完成。具体来说，只有当所有SSA相关的工作包括 _双址指令转换（Two-address pass）_、 _PHI节点清除（Phi Elimination）_ 以及 _合并拷贝操作（Copy coalescing）_ 完成后，才能确定哪些指令可以被打包到一起。`BUNDLE`指令收尾工作，包括向`BUNDLE`中添加指令、设定`BUNDLE`指令的参数（寄存器），要等虚拟寄存器到物理寄存器的转换完成之后才能进行。之所以不放在虚拟寄存器的阶段是因为彼时`BUNDLE`指令也需要占用虚拟寄存器，它会导致虚拟寄存器的引用加倍。
 
-> 译注：这里举个例子，比方说有一组指令共占用了四个虚拟寄存器作为输入或者输出，那么bundle之后，BUNDLE指令也引用到这四个虚拟寄存器。虚拟寄存器中保存了引用或定义它的指令的列表，这样它不仅需要保存使用它的子指令，还兼带保存了BUNDLE指令。就使得这个列表变得更长了。特别是如果寄存器所牵涉到的指令都是在 _bundle_ 中的，那这样做就几乎使得这个列表翻倍了。
+> 译注：这里举个例子。假设bundle中的子指令共占用了四个虚拟寄存器作为输入和输出，那么BUNDLE指令也会引用这四个虚拟寄存器。因为虚拟寄存器保存了所有引用它的指令，这样它不仅需要保存bundle内的子指令，也要保存BUNDLE指令。就使得这个列表变得更长了。特别是如果寄存器所牵涉到的指令都是在 _bundle_ 中的，那这样做就几乎使得这个列表大小翻倍。
 
 <h2 id="mclayer">The 'MC' Layer</h2>
-_MC Layer_的功能基本上和汇编器差不多，像什么 _常量池_， _跳转表_， _全局变量_ 这些概念它统统都没有。它能处理的，就是类似于 _标号（Label）_， _机器指令_， _Object file的节（section）_ 这些更加底层的概念。它的设计目的很明确，就是把处理好的指令输出成`.s`或者`.o`文件，以及作为`llvm-mc`这个工具的后端来处理代码的汇编和反汇编。
+_MC Layer_的功能基本上等同汇编器，像 _常量池_， _跳转表_， _全局变量_ 这些概念它统统都没有。它能处理的就是 _标号（Label）_， _机器指令_和 _Object file的节（section）_这些更加底层的概念。它的设计目的很明确，就是把处理好的指令输出成`.s`或者`.o`文件，同时也作为工具`llvm-mc`的后端来处理代码的汇编和反汇编。
 
 <h3><code>MCStreamer</code> API</h3>
-`MCStreamer`是一个非常棒的汇编器接口。针对不同的输出，例如`.s`或者输出`.o`，它都需要不同的实现。它的API与汇编文件的内容是对应的，它为每个汇编文件中的 _指示字（directive）_ 都提供了一个独立的函数，例如`EmitLabel`，`EmitSymbolAttribute`，`SwitchSelection`，`EmitValue`(`.byte`, `.word`)。还有`EmitInstruction`用于将`MCInst`添加到流中。
+`MCStreamer`是一个非常棒的汇编器接口。针对不同的输出如`.s`或者输出`.o`它都需要不同的实现。接口的API与汇编文件的内容对应，它为每个汇编文件中的 _指示字（directive）_ 都提供了一个独立函数如`EmitLabel`，`EmitSymbolAttribute`，`SwitchSelection`，`EmitValue`(`.byte`, `.word`)等。它还有`EmitInstruction`函数用于将`MCInst`添加到流中。
 
-LLVM中有两个地方用到了这个接口，一个是汇编器`llvm-mc`，一个是 _代码发射（Code Emission）_ 阶段，`MC Layer`中会调用`MCStreamer`的接口把IR或机器码对象转换成`.s`或者别的什么。
+LLVM中有两处用到此接口，一个是汇编器`llvm-mc`，一个是 _代码发射（Code Emission）_ 阶段`MC Layer`会调用`MCStreamer`的接口把IR或机器码对象转换成`.s`或者别的格式。
 
-实现方面LLVM提供了两个基本实现，`MCAsmStreamer`输出`.s`文件，`MCObjectStreamer`输出`.o`文件。相比之下前者的实现比较简单，只要把 _指示字_ 按照文本输出就行了，而后者则有完整的汇编器功能。
+实现方面，LLVM提供了两个基本实现：`MCAsmStreamer`输出`.s`文件，`MCObjectStreamer`输出`.o`文件。相比之下前者的实现比较简单，只要把 _指示字_ 按照文本输出就行了，而后者则有完整的汇编器功能。
 
 <h3>class <code>MCContext</code></h3>
 所有在MC阶段需要使用的数据如 _符号_ 和 _节_ 什么的都放在`MCContext`中。所以你要创建符号或者节就得和它打交道。另外这个类型不能被继承。
@@ -339,56 +341,55 @@ LLVM中有两个地方用到了这个接口，一个是汇编器`llvm-mc`，一�
 > 译注：快看！果然Context才是王道！
 
 <h3>class <code>MCSymbol</code></h3>
-`MCSymbol`直接对应了汇编文件中的 _symbol_（或者叫 _label_）。我们将所有的符号分成两类，一类是临时符号，一类是常规符号。临时符号只是在汇编的时候会使用，等object file生成之后，这些符号就会被丢弃掉。临时符号会有特定的前缀进行区分，例如在 _MachO_ 上的前缀就是"L"。
+`MCSymbol`直接对应了汇编文件中的 _符号（symbol）_或称 _标签（label）_。我们将所有的符号分成 _临时符号_ 和 _常规符号_ 两类。临时符号只是在汇编的时候会使用，等object file生成之后，这些符号就会被丢弃掉。临时符号会有特定前缀进行区分，例如在 _MachO_ 上的前缀就是"L"。
 
-`MCSymbol`有`MCContext`产生和管理，同时在`MCContext`中，每个Symbol只有一个实例。这样`MCSymbol`之间的比较用指针就可以了。不过不同的Symbol可能会指向相同的地址，比方说看下面这个例子：
+`MCSymbol`由`MCContext`产生和管理。在`MCContext`中每个Symbol只有一个实例，这样`MCSymbol`之间的比较用指针即可。不过，不同的Symbol可能会指向相同的地址，比方说下面的例子中，
 
 	foo:
 	bar:
 	  .byte 4
 
-在这种情况下`foo`和`bar`实际上都是指向`.byte 4`同一个位置的。
+`foo`和`bar`实际上都是指向`.byte 4`同一个位置的。
 
 <h3>class <code>MCSection</code></h3>
-`MCSection`是对object file中 _section_ 的描述。因为不同对象文件的实现中节的表示方法都不一样，因此对于不同的对象它都有不同的实现，如`MCSectionMachO`，`MCSectionCOFF`，`MCSectionELF`。和MCSymbol相同， _section_ 也是由产生并且在`MCContext`内是唯一的。
+`MCSection`是对object file中 _section_ 的描述。因为不同对象文件的实现中节的表示方法都不一样，因此对于不同的对象它都有不同的实现，如`MCSectionMachO`，`MCSectionCOFF`，`MCSectionELF`。和MCSymbol相同， _section_ 也是由产生`MCContext`且在`MCContext`内唯一。
 
 <h3>class <code>MCInst</code></h3>
-`MCInst`是MC阶段的机器指令。它比`MachineInstr`简单多了。虽然它的结构也是平台无关的，但是它保存的 _指令码（opcode）_ 以及一组 `MCOperand` 却都是平台相关的数据。MCOperand是一个union，它包含以下三种数据之一：立即数、目标寄存器ID或者符号表达式（`Lfoo-Lbar+42`）。符号表达式在MC阶段是由一个叫`MCExpr`的类表示。
+`MCInst`是MC阶段的机器指令，结构上比`MachineInstr`简单多。虽然它的结构也是平台无关的，但是它保存的 _指令码（opcode）_ 以及 `MCOperand` 都是平台相关的数据。MCOperand是一个union，它包含以下三种数据之一：立即数、目标寄存器ID或者由`MCExpr
+`表示的符号表达式（`Lfoo-Lbar+42`）。
 
-在整个MC Layer中，`MCInst`的地位很重要。无论是编码，或者打印输出，或者是汇编器和反汇编器的输入输出，它都是存储指令的唯一手段。
+`MCInst`在MC Layer中的地位非常重要，无论是编码、打印输出或者是汇编器和反汇编器的输入输出，它都是存储指令的唯一手段。
 
-> 译注：写到这里废话两句。这个文档中很多地方都在强调平台无关，好像一旦相关了它就是标题党一样。总结一下，LLVM的代码在以下方面都是平台无关的：
+> 译注：写到这里废话两句。这个文档中很多地方都在强调平台无关，好像一旦相关了它就是标题党一样。总结一下，LLVM在以下方面都是平台无关的：
 
-> 1. 结构上大多是平台无关的，比方说不管什么什么平台，它的指令都可以描述成Opcode + Operands的结构。
+> 1. 结构上大多平台无关。比方说不管什么平台，它的指令都可以描述成Opcode + Operands的结构。
 > 2. 大多数优化是平台无关的。
-> 3. 很多处理过程，如指令的生成（Instruction Selection）当中有很多步骤是平台无关的（这也是LLVM为什么信心满满的说未来要让所有的平台相关信息都可以写到`td`文件中）。但是这里的平台无关是有一些代价的，例如你需要给寄存器和指令提供通用而详尽的特性（用于模式匹配），尽管其中一部分描述在某些平台上是没有什么用。
-> 4. 最后就是，LLVM将很多实现与接口剥离开，比如MCStreamer。这样几乎可以让所有的逻辑都是平台无关的。
-> 5. 当然也可以雄辩说，这些实现都是针对寄存器机的共性，所以“平台无关”的说法都是扯淡。
+> 3. 很多处理过程如指令选择（Instruction Selection），当中有很多步骤是平台无关的（这也是LLVM为什么信心满满的说未来要让所有的平台相关信息都可以写到`td`文件中）。但是这里的平台无关是有一些代价的，例如你需要给寄存器和指令提供通用而详尽的特性用于模式匹配，尽管其中一部分描述在某些平台上没有作用。
+> 4. 最后就是，LLVM为很多平台相关的实现都提供了接口，比如MCStreamer。这样几乎可以让所有的逻辑都是平台无关的。
+> 当然也可以雄辩说，这些实现都是针对寄存器机的共性，所以“平台无关”的说法都是扯淡。
 
 <h2 id="gcalgo">目标无关的代码生成算法</h2>
 
-> 译注：终于到翻译到算法了。
-
-在 _代码生成器高层设计_ 一节我们已经展示了LLVM的工作流程。这一节主要是解释原理和代码生成器设计时的考量因素。
+在 _代码生成器高层设计_ 一节我们已经展示了LLVM的工作流程，这一节主要解释算法原理和代码生成器设计时的考量因素。
 
 <h3>指令选择(Instruction Selection)</h3>
-整个 _指令选择_ 阶段，就是要把LLVM的代码转化成平台相关的机器指令。关于这个问题有很多的现有方案，LLVM使用的是 _基于SelectionDAG的指令选择子（SelectionDAG based instruction selector）_。
+整个 _指令选择_ 阶段就是把LLVM的代码转化成平台相关的机器指令。关于这个问题有很多现有方案，LLVM使用的是 _基于SelectionDAG的指令选择子（SelectionDAG based instruction selector）_。
 
-大部分 _指令选择子_ 的代码都是由目标描述（`*.td`）文件直接产生的。我们当然希望以后`td`文件能包办一切，但是现阶段我们还需要为指令选择子提供一些自定义的C++实现。
+大部分 _指令选择子_ 的代码都是由目标描述（`*.td`）文件产生的，我们也希望以后`td`文件能包办一切，但是现阶段我们还需要为指令选择子提供一些自定义的C++实现。
 
 <h4>SelectionDAGs简介</h4>
-_SelectionDAG_ 是代码的一种抽象表达。这个结构有很很多优点。它适合与一些自动化指令选择算法协同工作，比方说基于动态规划的最优模式匹配（dynamic-programming based optimal pattern matching selectors）。对于代码生成，特别是指令的调度（instruction scheduling）它也是个非常易用的结构。另外，有很多底层但是平台无关的优化，可以很方便的应用到SelectionDAG上，当然这些优化需要平台提供相应的信息。
+_SelectionDAG_ 是代码的一种抽象表达。这个结构有很很多优点，它适合与一些自动化指令选择算法协同工作，比方说 _基于动态规划的最优模式匹配（dynamic-programming based optimal pattern matching selectors）_。对于代码生成特别是 _指令调度（instruction scheduling）_它也是个非常易用的结构。另外有很多底层但是平台无关的优化，也可以很方便的应用在SelectionDAG上，当然这些优化需要平台提供相应的信息。
 
-LLVM中的 _SelectionDAG_ 是一个以`SDNode`对象作为节点的 _有向无环图（DAG，Directed-Acylic-Graph）_。`SDNode`最重要的属性 _操作码（Operation Code，Opcode）_ 和 _操作数（Operands）_。前者用来表示Node是做什么的，后者是操作的参数。`include/llvm/CodeGen/SelectionDAGNodes.h`中提供了一些预定义的节点类型（Operation Node Types）。
+LLVM中的 _SelectionDAG_ 是一个以`SDNode`对象作为节点的 _有向无环图（DAG，Directed-Acylic-Graph）_。`SDNode`最重要的属性是 _操作码（Operation Code，Opcode）_ 和 _操作数（Operands）_。前者用来表示 _节点（Node）_ 是做什么的（也就是 _指令_或 _操作_），后者是操作的参数。`include/llvm/CodeGen/SelectionDAGNodes.h`中提供了一些预定义的 _节点类型（Operation Node Types）_。
 
-每个Node都可能使用其它节点作为输入，`SDNode`的 _operands_ 就用来保存它们所引用到的`SDNode`s，这也称作是 _边（Edges）_`（译注：确实就是DAG的一条边。）`。尽管大部分的 _运算（Operation）_ 或者说Node都只会产生（define）一个值`（译注：可理解为运算的返回值）`，但是实际上`SDNode`也可能会有多个值。比方说有一个Node是`sincos`，它就需要同时返回正弦和余弦值。对这种情况，其他节点的输入就必须要知道具体引用了它的哪一个返回值。此时 _边_ 就需要用`SDValue`而不能是简单的`SDNode`来表示。`SDValue`是一对值`<SDNode, unsigned>`，它不光指明了值的Node，还指明了它使用的是节点的第几个返回值。此外，每个值都是有类型的，所以都会有一个`MVT（Machine Value Type）`来表示它的类型。
+每个节点都可能使用其它节点作为输入，`SDNode`的 _operands_ 就用来保存它们所引用到的`SDNode`，这也称作是 _边（Edges）_`（译注：可以理解成DAG的边。）`。尽管大部分的 _运算（Operation）_ 都只会 _产生（或称定义，define）_ 一个值`（译注：可理解为运算的返回值）`，但是`SDNode`也可能会有多个值，比方指令`sincos`就需要同时返回正弦和余弦值。对这种情况，其他节点的输入就必须要知道具体引用了它的哪一个返回值，此时 _边_ 需要用`SDValue`而不能是简单的`SDNode`来表示。`SDValue`是一对值`<SDNode, unsigned>`，它不光指明了值的来源节点，还指明了它使用的是节点的第几个返回值。并且每个值都会有一个`MVT（Machine Value Type）`来表示它的类型。
 
 > 译注: `SDValue`在LLVM中经常作为`SDNode`的 _Reference_ 来使用；
 
 
-SelectionDAG有两种类型的值，分别表示 _数据流（Data Flow）_，另外一种则是表示 _控制流的依赖关系（Control Flow Dependencies）_。
+SelectionDAG有两种类型的值，分别表示 _数据流（Data Flow）_ 和 _控制流（Control Flow）_ 上的 _依赖关系（Dependencies）_。
 
-> 译注：这里我可能断句有点问题。不过大体上意思没差。
+> 译注：这里我可能断句有点问题。而且有些地方我也没理解清楚。
 > 所以，又到了举栗子的时间了！简单入门一下数据流和控制流依赖。
 > 有这么一段代码（:= 是 define 的意思）
 
@@ -402,39 +403,47 @@ SelectionDAG有两种类型的值，分别表示 _数据流（Data Flow）_，�
 > 那么这里的z对x就是数据流上的依赖。因为显然x一遍，z的值就变了。
 
 > 又有这么一段代码
->	if x: z := 3 else z := 4
+> ```
+>   if(x){
+>     z := 3
+>   } else {
+>     z := 4
+>   }
+> ```
 > 那么这个时候z对x当然也是有依赖的。显然x变了，执行路径可能就变了，z就变化了。这是控制流上的依赖。
+>
 > 当然对这个例子，你也可以理解成`z = cond(x, 3, 4)`，进而解释成数据流上的依赖，那当然也能行得通。
+> 另外按照下文的暗示，所有的副作用节点之间都是有控制依赖的。
 
-如果一个值在数据上依赖于其它Node，值类型就是数据的类型，比方说是个整型或者是浮点。但是如果这个值表示的是一个控制依赖，那么我们有一个更贴切的概念 _链（chain）_ 来命名这一类关系，它在LLVM中的类型是`MVT::Other`。并且，LLVM需要为所有有 _副作用（Side-effects）_ 的Node（例如Loads，Stores，Calls，Returns）提供一个排序。所有有副作用的节点都必须要接受一个 _令牌链（token chain）_ 作为输入，并且产生一个新的链作为输出。LLVM约定，输入的令牌链作为Node的第一个输入参数（operand #0），输出的令牌链作为Node的最后一个输出。
+如果一个值在数据上依赖于其它节点，那么这条边就是一个简单边，其类型是整型或浮点这样的数据类型。如果这个值表示的是一个 _控制依赖_，那么我们有一个更贴切的概念 _链（chain）_ 来命名这一类关系，它的类型是`MVT::Other`。并且，LLVM需要为所有有 _副作用（Side-effects）_ 的节点（例如Loads，Stores，Calls，Returns）提供一个排序。所有有副作用的节点都必须要接受一个 _令牌链（token chain）_ 作为输入，并且产生一个新的链作为输出。LLVM约定，输入的令牌链作为Node的第一个输入参数（operand #0），输出的令牌链作为Node的最后一个输出。
 
-> 译注：Token Chain在实现上就是一个Node Chain。
+> 译注：Token Chain在实现上就是一个Node Chain。所有的分支跳转节点、副作用节点都要加到这个Chain上。
 
-SelectionDAG有两类特殊的节点，_Entry_ 和 _Root_。_Entry_ 节点使用`ISD::EntryToken`作为 _Opcode_，而 _Root_ 节点是整个 _令牌链_ 中最后一个副作用节点。例如，如果一个函数体只有一个基本块，那`return`这个节点就是 _Root_ 节点。`
+SelectionDAG有两类特殊的节点，_Entry_ 和 _Root_。_Entry_ 节点使用`ISD::EntryToken`作为 _Opcode_，而 _Root_ 节点是整个 _令牌链_ 中最后一个副作用节点。例如，如果函数体只有一个基本块，那`return`这个节点就是 _Root_ 节点。`
 
 > 译注：文档中没有解释这两个节点的作用。多两句嘴。 
 
 > * _Entry_是整个DAG的入口，它标出了一个代码段的起始位置。在很多分析中，它都起到了哨兵节点的作用，很多`SDValue`（例如 _Root_）在初始化的时候都是指向 _Entry_ 节点。
-> * _Root_ 作为最后一个有副作用的节点，可以逆行向上索引到所有有副作用（也可以认为是有内存操作）的节点。这样做起别名分析、Scheduling、或者是Auto-Vectorization来就会很方便。此外，对volatile的读写操作，LLVM在构建Chain的时候有一些非常有趣的行为。
+> * _Root_ 作为最后一个有副作用的节点，可以逆行向上索引到所有有副作用的节点。这样做起别名分析、Scheduling、或者是Auto-Vectorization来就会很方便。此外，对volatile的读写操作LLVM在构建Chain的时候有一些非常有趣的行为。
 
-最后，SelectionDAG分为 _合法（Legal）_ 和 _非法（illegal）_ 两种。一个 _合法_ 的DAG中，所有节点的指令和参数类型都是目标平台直接支持的。比方说在32bit的PowerPC上，`i1`、`i8`、`i16`、`i64`这些类型就是 _非法_ 类型`（译注：32位PPC上就只有i32可用）`。所以说要翻译成机器直接运行的指令，得将包含了各种复杂数据类型和指令的 _非法_ DAG，通过 _类型合法化（Legalize Types）_ 和 _操作合法化（Legalize Operations）_ 两个阶段转换成一个 _合法_ 的DAG。
+最后，SelectionDAG分为 _合法（Legal）_ 和 _非法（illegal）_ 两种。一个 _合法_ 的DAG中所有节点的指令和参数类型都是目标平台直接支持的，例如32bit的PowerPC上，`i1`、`i8`、`i16`、`i64`这些类型就是 _非法_ 类型。所以说要翻译成机器直接运行的指令，得将包含了各种复杂数据类型和指令的 _非法_ DAG，通过 _类型合法化（Legalize Types）_ 和 _操作合法化（Legalize Operations）_ 两个阶段转换成一个 _合法_ 的DAG。
 
 <h4>基于SelectionDAG的指令选择过程</h4>
 基于SelectionDAG的指令选择是个很麻烦的过程，细分的话有以下几个阶段：
 
-1. 构建最初的DAG —— 首先将LLVM IR`（译注：LLVM IR在内存中也有个保存形式，和SelectionDAG不一样但是很相似）`转化成一个 _非法_ 的SelectionDAG。
+1. 构建最初的DAG —— 将LLVM IR`（译注：LLVM IR在内存中也有个保存形式，和SelectionDAG不一样但是很相似）`转化成一个 _非法_ 的SelectionDAG。
 
-2. 优化构建好的SelectionDAG —— 对构建好的SelectionDAG做一些简单优化，尽量让SelectionDAG简单一些，并且把一些平台支持的元指令（meta instructions）（例如 _旋转（Rotates）_、`div/rem`指令）识别出来。这样不仅可以优化最终代码，也可以让指令选择阶段变得稍微简单一些。
+2. 优化构建好的SelectionDAG —— 对构建好的SelectionDAG做一些简单优化，尽量让SelectionDAG简单一些，并且把一些平台支持的元指令（meta instructions）（例如 _旋转（Rotates）_、`div/rem`指令）识别出来。这样不仅可以优化最终代码，也可以让指令选择阶段变得简单一些。
 
-3. 合法化SelectionDAG类型 —— 把目标平台不支持的类型统统超度。
+3. 合法化SelectionDAG类型 —— 把目标平台不支持的类型统统超度成平台支持的数据类型。
 
 4. 优化SelectionDAG —— 合法化阶段肯定得有一些垃圾代码，把它们都消灭。
 
 5. 合法化SelectionDAG的操作（指令） —— 超度目标平台不支持的指令。
 
-6. 优化SelectionDAG —— 再次优化，消除前个阶段带来的一些问题。
+6. 优化SelectionDAG —— 再次优化，消除合法化阶段带来的问题。
 
-7. 指令选择 —— 指令选择子（instruction selector）会根据DAG上的操作（指令）选择合适的平台指令。这一步将会把平台无关的DAG转换成平台相关的DAG。
+7. 指令选择 —— 指令选择子（instruction selector）会根据DAG的操作（指令）选择合适的平台指令。这一步将会把平台无关的DAG转换成平台相关的DAG。
 
 8. SelectionDAG的调度与队列化（Scheduling and Formation） —— 最后一步是要将DAG重排成指令队列，并且发射到`MachineFunction`中。这一步LLVM使用的传统的Prepass调度算法。
 
@@ -444,44 +453,47 @@ SelectionDAG有两类特殊的节点，_Entry_ 和 _Root_。_Entry_ 节点使用
 
 >两者各有利弊。前者的问题在于，指令调度好了之后，寄存器分配时很可能会面临寄存器不够用的情况，那就得加入Spilling Code（寄存溢出代码），用内存来进行数据的周转（和虚拟内存差不多是一个道理）。这部分代码会影响到指令的延迟，这样会非常影响调度的效果。采用Postpass的方法，那就得在寄存器分配完才能进行调度，但此时就没有SSA了，依赖分析上就会差很多，指令调度就会很难做。
 
-在以上所有工作都完成后，SelectionDAG就能被销毁了，代码生成就可以进行接下来的一些工作。
+在以上所有工作都完成后，SelectionDAG就能被销毁了，代码生成器继续进行接下来的工作。
 
-为了满足大家的偷窥欲，LLC提供了一些参数，将编译的中间过程可视化出来：
+为了满足大家的偷窥欲，LLC提供了一些参数可将编译的中间过程可视化：
 
 * `-view-dag-combine1-dags` 可以显示初始构建、还没被优化的DAG。
 * `-view-legalize-dags` 可以显示在合法化之前的DAG（已经经过一些优化了）。
 * `-view-dag-combine2-dags` 可以显示第二次优化之前的DAG（已经经过一些优化了）。
 * `-view-isel-dags` 可以显示指令选择之前的DAG。
 
-如果一切OK的话，在你敲完这些命令之后稍等片刻就会弹出一个窗口把DAG给绘制出来。如果你除了错误提示别的都看不到，那可能是配置出问题了，重新按照文档配置一下LLVM吧`（译注：一般就是什么dot啊，graphviz之类的画图软件配置）`。最后，还有个命令`-view-sunit-dags`可以显示Scheduler的依赖图。这个依赖图是依据最终的SelectionDAG绘制出来。在这张图里面，我们可以知道那些指令 _bundle_ 到了一起。不过它省略了一些与指令调度无关的立即数和节点。
+如果一切OK的话，在你敲完这些命令之后稍等片刻就会弹出一个窗口将DAG绘制出来。如果你除了错误提示别的都看不到，那可能是配置出问题了，重新按照文档配置一下LLVM吧`（译注：一般就是什么dot啊，graphviz之类的画图软件没有配置好）`。最后，还有个命令`-view-sunit-dags`可以显示Scheduler的依赖图。这个依赖图是依据最终的SelectionDAG绘制出来的，在这张图里面，我们可以知道哪些指令 _bundle_ 到了一起。不过它省略了一些与指令调度无关的立即数和节点。
 
 <h4>创建初始的SelectionDAG</h4>
-SelectionDAG的创建是个基本的窥孔算法。LLVM IR经过`SelectionDAGBuilder`的处理后转换成SelectionDAG。我们希望这一阶段
-可以给SelectionDAG附加尽可能多的底层与平台相关的细节。这个Pass基本都是人肉的。你得人肉的把IR中的`add`指令转换成SelectionDAG中的`add`节点，也要把IR中的`GetElementPtr`指令人肉展开成地址的算术运算。
+SelectionDAG的创建是个基本的窥孔算法。LLVM IR经过`SelectionDAGBuilder`的处理后转换成SelectionDAG。我们希望这一阶段可以给SelectionDAG附加尽可能多的与平台相关的细节。这个Pass基本都是人肉的，你需要手工将IR中的`add`指令转换成SelectionDAG中的`add`节点，也要把IR中的`GetElementPtr`指令人肉展开成地址的算术运算。
 
 > 译注：`GetElementPtr`是LLVM IR的指令，用于计算结构体成员或者数组元素的地址偏移量。
 
-根据平台的不同，call，return，varargs这些指令的在转换成DAG的时候都会有所差异，可以使用`TargetLowering`接口作为 _hook_实现平台相关的特性。
+根据平台的不同，`call`，`return`，`varargs`这些指令的在转换成DAG的时候都会有所差异，可以使用`TargetLowering`接口作为 _hook_以实现平台相关的特性。
 
 <h4>合法化(Legalize)SelectionDAG中的类型</h4>
 
-这一步要把DAG中用到的数据的类型统统转化成被目标平台直接支持的类型。达到这个目的有两种主要途径，一个是将较小的类型转成较大的类型，即 _类型提升（promoting）_，一种是将较大的类型拆分成多个小的类型，即 _展开（Expanding）_。比方说在某些平台上只有64位浮点和32位整数的运算指令，你得把所有f32都 _提升（promoted）_ 到f64，并把i1/i8/i16都提升到i32，同时要把i64拆分成两个i32来存储。当然在提升或扩展的过程中可能会遇到一些问题，例如整型位数变化后，可能需要 _带符号扩展（signed extension）_ 或 _无符号扩展（zero extension）_。无论怎样，最终都要保证最终的指令与原始的IR行为上要完全一致。
+这一步要把DAG中用到的数据的类型统统转化成目标平台直接支持的类型。达到这个目的主要有两条途径，一种是将较小的类型转成较大的类型，即 _类型提升（promoting）_；一种是将较大的类型拆分成多个小的类型，即 _展开（Expanding）_。比方说在某些平台上只有64位浮点和32位整数的运算指令，你得把所有f32都 _提升（promoted）_ 到f64，i1/i8/i16都提升到i32，同时还要把i64拆分成两个i32来存储。当然在提升或扩展的过程中可能会遇到一些问题，例如整型位数变化后，可能需要 _带符号扩展（signed extension）_ 或 _无符号扩展（zero extension）_。无论怎样，最终都要保证转换后的指令与原始的IR在行为上完全一致。
 
-LLVM IR中有目标平台无法支持的矢量`（译注： LLVM IR还支持任意长度的 _矢量（vector）_。译注：LLVM中的矢量是为SIMD操作设计的。但是目标平台可能无法支持任意长度的矢量，例如x86上SSE的一些指令只支持4个单精度浮点的矢量。）`，LLVM也会有两种转换方案，_加宽（widening）_，即将大vector拆分成多个可以被平台支持的小vector，不足一个vector的部分补齐成一个vector`（译注：例如在x86平台上将15个f32的vector补齐成16个f32然后拆分成四个m128）`；以及 _标量化（scalarizing）_，即在不支持SIMD指令的平台上，将矢量拆成多个标量进行运算。
+LLVM IR中有目标平台无法支持的矢量，LLVM也会有两种转换方案，_加宽（widening）_，即将大vector拆分成多个可以被平台支持的小vector，不足一个vector的部分补齐成一个vector；以及 _标量化（scalarizing）_，即在不支持SIMD指令的平台上，将矢量拆成多个标量进行运算。
 
-在平台特定的`TargetLowering`实现的时候，要用`addRegisterClass`注册平台的寄存器分类及对应的数据类型。 _Legalizer_会根据这些信息来确定平台所支持的类型。
+> 译注：LLVM IR支持任意长度的 _矢量（vector）_。LLVM中的矢量是为SIMD操作设计的，但是目标平台可能无法支持任意长度的矢量，例如x86上SSE的一些指令只支持4个单精度浮点的矢量。因此，在x86平台上需要将15个f32的vector补齐成16个f32然后拆分成四个m128。
+
+在初始化平台特定的`TargetLowering`时，要用`addRegisterClass`注册平台支持的数据类型及对应的寄存器分类。 _Legalizer_会根据这些信息来确定平台所支持的类型。
 
 <h4>合法化SelectionDAG 中的操作符</h4>
 这一步将DAG中节点的操作/指令合法化成平台支持的操作。
 
-即便数据都是平台所支持的，它也不太可能提供IR中的每一条指令。例如x86中就没有 _条件赋值（conditional moves）_ 指令，PowerPC也不支持从一个16-bit的内存上以符号扩展的方式读取整数。因此，_合法化_ 阶段要将这些不支持的指令按三种方式转换成平台支持的操作： _扩展（Expansion）_，用一组指令来模拟一条操作； _提升（promotion）_ 将数据转换成更大的类型， _定制（Custom）_ 通过Hook，让用户实现合法化。
+目标平台一般不可能为所有支持的数据提供IR中所具有的全部指令，x86上没有 _条件赋值（conditional moves）_ 指令，PowerPC也不支持从一个16-bit的内存上以符号扩展的方式读取整数。因此，_合法化_ 阶段要将这些不支持的指令按三种方式转换成平台支持的操作： _扩展（Expansion）_，用一组指令来模拟一条操作； _提升（promotion）_ 将数据转换成更大的类型； _定制（Custom）_ 通过Hook，让用户实现合法化。
 
-在平台对应的`TargetLowering`初始化时，需调用`setOperationAction`注册不被支持的操作，并指定三种行为的一种来完成合法化。
+在初始化平台对应的`TargetLowering`时，需调用`setOperationAction`注册不被支持的操作，并指定三种行为的一种来完成合法化。
 
-如果没有 _合法化_，那么所有的平台上的选择子都需要支持DAG中的每一条操作和所有数据类型。借助于 _合法化_，我们可以让平台间共享全部的规范化模式（cononicalized pattern）。并且因为规范化后的代码仍然是DAG的，因此优化起来也非常方便。`（译注：这里不甚明了cononicalized pattern的具体含义，因此只是直译。不过猜测此处的Pattern应该是指那些平台无关的模式匹配规则。）`
+如果没有 _合法化_，那么所有平台上的 _选择子_ 都需要支持DAG中的每一条操作和全部数据类型。借助于 _合法化_，我们可以让平台间共享全部的规范化模式（cononicalized pattern），并且因为规范化后的代码仍然是DAG，因此优化起来也非常方便。
+
+> 译注：这里不甚明了cononicalized pattern的具体含义，因此只是直译。不过猜测此处的Pattern应该是指那些平台无关的模式匹配规则。
 
 <h4>SelectionDAG的优化</h4>
-在整个代码生成阶段，SelectionDAG会被优化多次。在SelectionDAG构建完成之后就需要进行首次优化，完成一些代码的清理工作（例如根据指令参数的具体类型进行的优化）。其他的几轮优化用于清除合法化带来的一些垃圾代码。有了单独的优化pass，合法化就可以不用过于操心生成的代码质量，这样就可以变得简单一些。
+在整个代码生成阶段，SelectionDAG会被优化多次，在SelectionDAG构建完成之后就需要进行首次优化，完成一些代码的清理工作（例如根据指令参数的具体类型进行的优化）。其他的几轮优化用于清除合法化带来的一些垃圾代码。有了单独的优化pass，合法化就可以不必过于操心生成的代码质量，从而使 _合法化_ 的实现变得简单一些。
 
 另外在指令选择的时候，会生成一大堆的整数带符号扩展或者无符号扩展，这些代码是优化的重点。目前LLVM里面还是 _人肉（ad-hoc）处理_ 它，以后我们会该用更严谨的算法去实现，例如：
 
@@ -494,9 +506,9 @@ Motohiro Kawahito, Hideaki Komatsu, and Toshio Nakatani
 Proceedings of the ACM SIGPLAN 2002 Conference on Programming Language Design and Implementation.
 
 <h4>选择机器指令</h4>
-_选择阶段（Select Phase）_ 是所有平台相关的指令选择过程的统称。这一阶段的输入是合法的SelectionDAG，通过模式匹配出平台指令，并将结果输出到一个新的DAG。考虑一下LLVM IR片段：
+_选择阶段（Select Phase）_ 是所有平台相关的指令选择过程的统称。这一阶段的输入是合法的SelectionDAG，通过模式匹配获得平台指令，并将结果输出到一个新的DAG。考虑以下LLVM IR片段：
 
-> 译注：Legalize的阶段和Select阶段都会变换SelectionDAG中的Operation。只不过前者是将目标无关的Operation转换成目标无关但是会被平台支持的Operation，后者是将平台支持的Operation变成平台的指令。
+> 译注：Legalize的阶段和Select阶段都会变换SelectionDAG中的Operation。只不过前者是将目标无关的Operation转换成目标无关但是会被平台支持的Operation，后者是将平台支持的Operation变成平台指令。
 
 ```
 %1 = fadd float %w, %x 
@@ -523,13 +535,13 @@ def FMADDS
 	: AForm_1<59, 29,
      (ops F4RC:$FRT, F4RC:$FRA, F4RC:$FRC, F4RC:$FRB),
       "fmadds $FRT, $FRA, $FRC, $FRB",
-      *[(set F4RC:$FRT, (fadd (fmul F4RC:$FRA, F4RC:$FRC),
-                                           F4RC:$FRB))]*>;
+      <b>[(set F4RC:$FRT, (fadd (fmul F4RC:$FRA, F4RC:$FRC)</b>,
+                                           F4RC:$FRB))]>;
 def FADDS
 	: AForm_2<59, 21,
      (ops F4RC:$FRT, F4RC:$FRA, F4RC:$FRB),
       "fadds $FRT, $FRA, $FRB",
-      *[(set F4RC:$FRT, (fadd F4RC:$FRA, F4RC:$FRB))]*>;
+      [(set F4RC:$FRT, (fadd F4RC:$FRA, F4RC:$FRB))]>;
 ```
 
 加粗的部分就是对模式匹配的提示。所有的DAG操作/指令例如`fmul/fadd`都在`include/llvm/Target/TargetSelectionDAG.td`。`F4RC`是输出和输出的寄存器分类。
