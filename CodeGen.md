@@ -11,7 +11,7 @@
 
 ----------------------------
 
-<h2 id=“prologue”>译序</h2>
+<h2 id="prologue">译序</h2>
 
 LLVM的名字其实弱爆了，Low Level Virtual Machine。从字面上看去它不过是一个类似于JVM的虚拟机。但是实际上这个项目自从被苹果包养之后，它已经远远超出了一个虚拟机所具有的能力。其实我觉得它压根儿就和虚拟机没什么关系，完全就是一个Compiler。
 
@@ -148,7 +148,7 @@ LLVM中使用的平台无关的代码生成器，是针对标准的寄存器机�
 <h3>class <code>TargetJITInfo		</code></h3>
 如果`TargetMachine`需要支持JIT的话，那么这个`TargetMachine`就需要实现方法`getJITInfo`，它将返回一个由`TargetJITInfo`派生出的具体类型的实例。JIT过程中需要的一些行为，都需要由`TargetJITInfo`的派生类提供支持，例如怎么去生成一个 _桩函数（Stub）_。(译注：Stub是JIT中一个很重要的概念。在JIT程序初始化的时候，会将每个函数都初始化成Stub。这个Stub很短很简单，他的逻辑是，当自己被调用的时候，就去找JIT Engine，为自己生成一个真正的函数体，然后把自己替换掉，以执行真正的逻辑。)
 
-<h2 id = "mcdesc_classes">描述机器码的类</h2>
+<h2 id="mcdesc_classes">描述机器码的类</h2>
 简单来说，从LLVM code生成的机器码最后会由以下三个类的实例来表达， `MachineFunction`, `MachineBasicBlock`和`MachineInstr`。相关的代码可以在`include/llvm/CodeGen/`中找到。每条指令由一个 _操作码（opcode）_ 和 若干个 _参数（Operands）_ 构成。很显然这个表示方法在任何平台上都是适用的，它既能将机器代码表现成SSA Form的形式，也能在寄存器分配完成后表现非SSA形式的汇编。
 
 <h3>class <code>MachineInstr</code></h3>
