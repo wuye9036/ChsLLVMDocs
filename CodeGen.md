@@ -1,17 +1,6 @@
 ﻿#LLVM中目标无关(Target-Indepenent)的代码生成(Code Generator)
 
-* [译序](#prolugue)
-* [介绍](#introduction)
-* [描述目标平台的类](#tardesc_classes)
-* [描述机器码的类](#mcdesc_classes)
-* [MC层](#mclayer)
-* [目标无关的代码生成算法](#cgalgo)
-* [Native Assembler的实现](#nativeassembler)
-* [特定平台(Target-Specific)的一些注意事项](#targspec_notes)
-
-----------------------------
-
-<h2 id = "prolugue">译序</h2>
+## 译序
 
 LLVM的名字其实弱爆了，Low Level Virtual Machine。从字面上看去它不过是一个类似于JVM的虚拟机。但是实际上这个项目自从被苹果包养之后，它已经远远超出了一个虚拟机所具有的能力。其实我觉得它压根儿就和虚拟机没什么关系，完全就是一个Compiler。
 
@@ -38,7 +27,7 @@ LLVM IR与汇编格式相近，如你看到的这样：
 	  ret i32 %tmp
 	}
 
-但同时， _LLVM IR_是遵从 _SSA Form_ 的。所谓 _SSA Form_，即 _Static Single Assignment Form_，译名为 *[静态单赋值](http://zh.wikipedia.org/zh-cn/%E9%9D%99%E6%80%81%E5%8D%95%E8%B5%8B%E5%80%BC%E5%BD%A2%E5%BC%8F)* 。静态单赋值极大地降低了数据流分析和控制流分析的复杂度这两个编译器优化和静态检查中的关键技术的复杂度。它的特点是程序中的每个值只能在定义(defined)时被赋值，之后再也不能被改变。比方说
+但同时， _LLVM IR_是遵从 _SSA Form_ 的。所谓 _SSA Form_，即 _Static Single Assignment Form_，译名为 *[静态单赋值](http://zh.wikipedia.org/zh-cn/%E9%9D%99%E6%80%81%E5%8D%95%E8%B5%8B%E5%80%BC%E5%BD%A2%E5%BC%8F)* 。静态单赋值极大地降低了数据流分析和控制流分析这两个编译器优化和静态检查中的关键技术的复杂度。它的特点是程序中的每个值只能在定义(defined)时被赋值，之后再也不能被改变。比方说
 
 	%3 = fadd %1, %2 
 	%5 = fadd %3, %4 
@@ -62,8 +51,8 @@ LLVM IR与汇编格式相近，如你看到的这样：
 
 > 译注：本文在说 _目标平台_ 时对应的原文中的单词是 _Target_ 。为了简单起见，在不产生歧义的情况下，我会将 _Target_ 翻译成 _平台_ 。
 
-<h2 id = "introduction">介绍</h2>
-LLVM中的平台无关 _代码生成器（Code Generator）_，同时也是一个编译器开发 _框架（Framework）_。它给提供了一些可复用的组件，帮助用户将LLVM IR编译到特定的平台上。此外，LLVM的输出格式也非常灵活，它既可以是文本形态的汇编也可以是二进制的机器码。前者一般用于静态编译器，后者则可以用于JIT。纵观整个架构，代码生成可分成以下六个部分：
+## 介绍
+LLVM中的平台无关 _代码生成器（Code Generator）_，同时也是一个编译器开发 _框架（Framework）_。它提供了一些可复用的组件，帮助用户将LLVM IR编译到特定的平台上。此外，LLVM的输出格式也非常灵活，既可以是文本形态的汇编也可以是二进制的机器码。前者一般用于静态编译器，后者则可以用于JIT。纵观整个架构，代码生成可分成以下六个部分：
 
 1. **描述平台特性的抽象接口（Abstract Target Description Interfaces）**。它定义了一组接口用于描述平台特性。在设计上，它们仅用来说明特性，至于特性是如何被代码生成器使用的，接口对此并不关心。相关的定义和实现可参阅`include/llvm/Target/`。   
 2. 一组表达 **生成后代码（Code being generated）** 的类。这些类保存的并不是与平台直接相关的指令和数据，而是能够跨平台的概念或特性，比方说 _常量池项（Constant Pool Entries）_ 和 _跳转表（Jump Tables）_ 这些都是在这一层体现的。具体代码见`include/llvm/CodeGen/`。   
